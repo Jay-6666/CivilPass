@@ -552,16 +552,6 @@ def display_policy_news():
             import matplotlib.pyplot as plt
             from matplotlib import font_manager
 
-            try:
-                font_path = "/usr/share/fonts/truetype/arphic/SimHei.ttf"  # Linux 常见路径
-                if not os.path.exists(font_path):
-                    font_path = "C:/Windows/Fonts/simhei.ttf"  # Windows 路径
-                font_prop = font_manager.FontProperties(fname=font_path)
-                plt.rcParams['font.family'] = font_prop.get_name()
-                plt.rcParams['axes.unicode_minus'] = False
-            except Exception as e:
-                st.warning("⚠️ 字体加载失败，已使用默认字体")
-
             region_counts = processed_df['region'].value_counts()
             fig, ax = plt.subplots(figsize=(8, 8))
             region_counts.plot.pie(autopct='%1.1f%%', ax=ax)
