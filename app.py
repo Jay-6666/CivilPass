@@ -1,4 +1,3 @@
-# 优化后的 Streamlit 公考助手代码
 import streamlit as st
 import openai
 import oss2
@@ -8,6 +7,18 @@ from io import BytesIO
 from dotenv import load_dotenv
 import os
 import base64
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+
+try:
+    font_path = "/usr/share/fonts/truetype/arphic/SimHei.ttf"  # Linux 常见路径
+    if not os.path.exists(font_path):
+        font_path = "C:/Windows/Fonts/simhei.ttf"  # Windows 路径
+    font_prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams['font.family'] = font_prop.get_name()
+    plt.rcParams['axes.unicode_minus'] = False
+except Exception as e:
+    st.warning("⚠️ 字体加载失败，已使用默认字体")
 
 # 环境变量读取
 load_dotenv()
@@ -541,11 +552,15 @@ def display_policy_news():
             import matplotlib.pyplot as plt
             from matplotlib import font_manager
 
-            # ✅ 添加中文字体支持（以 SimHei 黑体为例）
-            font_path = "C:/Windows/Fonts/simhei.ttf"  # Windows 系统的字体路径
-            font_prop = font_manager.FontProperties(fname=font_path)
-            plt.rcParams['font.family'] = font_prop.get_name()
-            plt.rcParams['axes.unicode_minus'] = False
+            try:
+                font_path = "/usr/share/fonts/truetype/arphic/SimHei.ttf"  # Linux 常见路径
+                if not os.path.exists(font_path):
+                    font_path = "C:/Windows/Fonts/simhei.ttf"  # Windows 路径
+                font_prop = font_manager.FontProperties(fname=font_path)
+                plt.rcParams['font.family'] = font_prop.get_name()
+                plt.rcParams['axes.unicode_minus'] = False
+            except Exception as e:
+                st.warning("⚠️ 字体加载失败，已使用默认字体")
 
             region_counts = processed_df['region'].value_counts()
             fig, ax = plt.subplots(figsize=(8, 8))
