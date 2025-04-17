@@ -669,12 +669,8 @@ def display_exam_calendar():
         with col2:
             search_query = st.text_input("🔍 搜索考试名称或地区", placeholder="输入关键词筛选...")
         with col3:
-            view_mode = st.radio(
-                "视图模式",
-                ["🗓 月历视图", "⏳ 时间线"],
-                horizontal=True,
-                label_visibility="collapsed"
-            )
+            view_mode = "🗓 月历视图"  # 强制固定视图模式
+            st.markdown('<div style="visibility:hidden">占位</div>', unsafe_allow_html=True)
 
     # 过滤数据
     filtered_events = [
@@ -730,37 +726,6 @@ def display_exam_calendar():
                         with col2:
                             if event.get('image'):
                                 st.image(f"{ENDPOINT}/{event['image']}", width=120)
-    else:
-        # 时间线视图
-        timeline_html = """
-        <div class="timeline">
-            {% for event in events %}
-            <div class="timeline-item">
-                <div class="timeline-date">
-                    {{ event.date }} 
-                    <span style="font-size:0.8em;color:#666;">{{ event.regions|join(' ') }}</span>
-                </div>
-                <div class="timeline-content">
-                    <h3>{{ event.name }}</h3>
-                    <div>
-                        {% for tag in event.tags %}
-                        <span class="calendar-tag">{{ tag }}</span>
-                        {% endfor %}
-                    </div>
-                    {% if event.sources %}
-                    <div style="margin-top:10px;">
-                        {% for source in event.sources %}
-                        <a href="{{ source }}" target="_blank" style="font-size:0.9em;">🔗 官方链接</a>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-        """
-        rendered = jinja2.Template(timeline_html).render(events=filtered_events)
-        st.markdown(rendered, unsafe_allow_html=True)
 
     # 侧边提醒栏
     with st.sidebar:
