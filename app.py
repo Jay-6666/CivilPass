@@ -16,7 +16,6 @@ from PIL import Image
 from dotenv import load_dotenv
 import jinja2
 
-
 # 环境变量读取
 load_dotenv()
 ACCESS_KEY_ID = os.getenv("ACCESS_KEY_ID")
@@ -472,11 +471,11 @@ def display_policy_news():
 
     processed_df = process_data(df)
 
-    PAGE_SIZE = 10
+    PAGE_SIZE = 5
     total_items = len(processed_df)
     total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
 
-    # ⏮ 翻页按钮
+    # 翻页按钮
     col_prev, col_page, col_next = st.columns([1, 2, 1])
     with col_prev:
         if st.button("← 上一页") and st.session_state.current_page > 1:
@@ -511,10 +510,28 @@ def display_policy_news():
 
         for _, row in current_data.iterrows():
             with st.container(border=True):
-                col1, col2 = st.columns([4, 1])
+                # 响应式列布局
+                col1, col2 = st.columns([4, 1], gap="small")
+
                 with col1:
-                    st.markdown(f"### [{row['title']}]({row['url']})")
-                    meta_cols = st.columns(3)
+                    # 增强型可点击标题
+                    st.markdown(f"""
+                        <a href="{row['url']}" target="_blank" 
+                            style="text-decoration: none;
+                                   color: inherit;
+                                   display: block;
+                                   padding: 8px 0;">
+                            <h3 style="margin: 0;
+                                      font-size: 1.2rem;
+                                      line-height: 1.4;
+                                      border-bottom: 2px solid #eee;
+                                      padding-bottom: 8px;">
+                                {row['title']}
+                            </h3>
+                        </a>
+                    """, unsafe_allow_html=True)
+
+                    meta_cols = st.columns([2, 2, 2], gap="small")
                     with meta_cols[0]:
                         st.markdown(f"📅 **日期**: {row['date'].strftime('%Y/%m/%d')}")
                     with meta_cols[1]:
@@ -524,13 +541,45 @@ def display_policy_news():
                     with st.expander("📝 查看摘要"):
                         st.write(row['summary'])
                 with col2:
-                    st.metric("🔥 热度指数", f"{row['hotness']}")
-                    if st.button("⭐ 收藏", key=f"fav_{row['url']}"):
-                        st.toast("已加入收藏夹！", icon="✅")
-                    st.markdown("---")
+                    # 交互按钮组
                     st.markdown(f"""
-                        <div style="text-align: center; margin-top: 8px;">
-                            <a href="{row['url']}" target="_blank" style="text-decoration: none; font-size: 14px;">🔗 查看原文</a>
+                        <div style="text-align: center;
+                                  padding: 8px;
+                                  background: #f8f9fa;
+                                  border-radius: 12px;">
+                            <div style="font-size: 1.2rem; 
+                                      color: #ff4b4b;
+                                      margin: 8px 0;">
+                                🔥 {row['hotness']}
+                            </div>
+                            <a href="{row['url']}" 
+                               target="_blank" 
+                               style="display: block;
+                                      padding: 10px;
+                                      background: #007bff;
+                                      color: white;
+                                      border-radius: 25px;
+                                      text-decoration: none;
+                                      margin: 8px 0;
+                                      transition: all 0.3s;"
+                               onmouseover="this.style.transform='scale(1.05)'" 
+                               onmouseout="this.style.transform='scale(1)'">
+                                🔗 查看原文
+                            </a>
+                            <button onclick="alert('收藏功能需登录后使用')" 
+                                    style="width: 100%;
+                                           padding: 10px;
+                                           border: none;
+                                           border-radius: 25px;
+                                           background: #28a745;
+                                           color: white;
+                                           margin: 8px 0;
+                                           cursor: pointer;
+                                           transition: all 0.3s;"
+                                    onmouseover="this.style.transform='scale(1.05)'" 
+                                    onmouseout="this.style.transform='scale(1)'">
+                                ⭐ 收藏
+                            </button>
                         </div>
                     """, unsafe_allow_html=True)
 
@@ -546,9 +595,6 @@ def display_policy_news():
             st.area_chart(time_series)
 
         with tab3:
-            import matplotlib.pyplot as plt
-            from matplotlib import font_manager
-
             region_counts = processed_df['region'].value_counts()
             fig, ax = plt.subplots(figsize=(8, 8))
             region_counts.plot.pie(autopct='%1.1f%%', ax=ax)
@@ -563,14 +609,53 @@ def display_policy_news():
             help="导出当前筛选条件下的所有结果"
         )
 
+    # 移动端优化样式
     st.markdown("""
         <style>
+            /* 基础优化 */
+            a { transition: all 0.3s; }
+
+            /* 移动端适配 */
             @media (max-width: 768px) {
-                .stContainer > div {
-                    flex-direction: column !important;
+                /* 容器优化 */
+                .stContainer {
+                    padding: 0 8px !important;
                 }
-                .element-container {
-                    margin-bottom: 1rem;
+
+                /* 标题优化 */
+                h3 {
+                    font-size: 1.1rem !important;
+                    line-height: 1.3 !important;
+                }
+
+                /* 按钮优化 */
+                .stButton > button {
+                    width: 100% !important;
+                    padding: 12px !important;
+                }
+
+                /* 元信息列布局 */
+                [data-testid="column"] {
+                    padding: 4px !important;
+                }
+
+                /* 增大点击区域 */
+                a[target="_blank"] {
+                    padding: 16px 0 !important;
+                    margin: -16px 0 !important;
+                    display: block !important;
+                }
+
+                /* 交互反馈 */
+                a:active, button:active {
+                    transform: scale(0.95) !important;
+                }
+            }
+
+            /* 桌面端优化 */
+            @media (min-width: 769px) {
+                .stButton > button {
+                    min-width: 120px;
                 }
             }
         </style>
