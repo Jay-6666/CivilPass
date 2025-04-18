@@ -1,14 +1,21 @@
-import streamlit as st
-import openai
-import oss2
-import time
-import pandas as pd
-from io import BytesIO
-from dotenv import load_dotenv
-import os
 import base64
+import json
+import os
+import time
+from collections import defaultdict
+from datetime import datetime
+from io import BytesIO
+
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
+import openai
+import oss2
+import pandas as pd
+import streamlit as st
+from PIL import Image
+from dotenv import load_dotenv
+import jinja2
+
 
 # 环境变量读取
 load_dotenv()
@@ -25,7 +32,7 @@ ENDPOINT = f"https://{BUCKET_NAME}.oss-{REGION}.aliyuncs.com"
 auth = oss2.Auth(ACCESS_KEY_ID, ACCESS_KEY_SECRET)
 bucket = oss2.Bucket(auth, f"http://oss-{REGION}.aliyuncs.com", BUCKET_NAME)
 
-# 夜间模式
+# 夜晚模式
 def set_dark_mode(dark: bool):
     if dark:
         st.markdown("""
@@ -242,7 +249,7 @@ def display_experience():
     st.caption("📢 来自高分考生的真实经验分享")
     st.markdown("---")
 
-    # 用户上传功能区（独立目录）
+    # 用户上传功能区
     with st.expander("📤 上传我的学习资料", expanded=False):
         # 创建两列布局
         col_upload, col_desc = st.columns([2, 3])
@@ -366,13 +373,13 @@ def display_experience():
             tab.error(f"加载失败：{str(e)}")
 
     # 各标签页内容
-    with tab_exp:  # 原始高分经验
+    with tab_exp:
         display_files(prefix="高分经验/", tab=tab_exp)
 
-    with tab_notes:  # 独立学习笔记
+    with tab_notes:
         display_files(prefix="学习笔记/", tab=tab_notes)
 
-    with tab_errors:  # 独立错题集
+    with tab_errors:
         display_files(prefix="错题集/", tab=tab_errors)
 
 # 政策资讯模块
@@ -483,7 +490,7 @@ def display_policy_news():
             unsafe_allow_html=True
         )
 
-    # 页码重置逻辑（每次筛选条件变化时都重置为第 1 页）
+    # 页码重置逻辑
     if st.session_state.current_page > total_pages:
         st.session_state.current_page = total_pages
 
@@ -571,13 +578,6 @@ def display_policy_news():
 
 #考试日历模块
 def display_exam_calendar():
-    import json
-    from collections import defaultdict
-    from io import BytesIO
-    from PIL import Image
-    import jinja2
-    from datetime import datetime
-
     st.title("📅 智能考试日历")
     st.markdown("⚠️ <span style='color:red;'>考试时间仅供参考，请以官方公布为准！</span>", unsafe_allow_html=True)
     st.markdown("---")
@@ -739,11 +739,21 @@ def display_exam_calendar():
         st.markdown("---")
         st.markdown("**📲 手机订阅**")
         st.write("扫描二维码订阅日历")
+
+        # 获取二维码图片并展示
         try:
-            qr_code = Image.open("path_to_qrcode.png")  # 替换为你的二维码图片路径
-            st.image(qr_code, width=150)
-        except Exception:
-            st.warning("⚠️ 未找到二维码图片")
+            qr_key = "civilpass/qrcode/exam_calendar_qrcode.png"
+            qr_image_data = get_cached_oss_object(qr_key)
+
+            if qr_image_data:
+                import base64
+                b64_img = base64.b64encode(qr_image_data).decode("utf-8")
+                st.image(f"data:image/png;base64,{b64_img}", width=300)
+            else:
+                st.warning("⚠️ 未找到二维码图片")
+
+        except Exception as e:
+            st.warning(f"⚠️ 加载二维码失败：{e}")
 
     # 移动端适配
     st.markdown("""
@@ -760,7 +770,6 @@ def display_exam_calendar():
             });
         </script>
     """, unsafe_allow_html=True)
-
 
 # 管理员上传模块
 def admin_upload_center():
