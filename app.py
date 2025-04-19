@@ -242,6 +242,374 @@ def display_study_materials():
         except Exception as e:
             st.error(f"❌ 加载失败：{e}")
 
+# 政策资讯模块
+def display_policy_news():
+    st.title("📰 政策资讯")
+    st.caption("📢 最新公务员政策动态与权威解读")
+    st.markdown("---")
+
+    @st.cache_data(ttl=3600, show_spinner="正在加载最新政策资讯...")
+    def load_all_policy_data():
+        # 配置参数（可提取到配置文件）
+        OSS_PATH = "政策咨询"  # OSS存储路径
+        REQUIRED_COLUMNS = ['title', 'source', 'date', 'url']  # 必要字段
+        DEFAULT_VALUES = {  # 默认值配置
+            'summary': '暂无摘要',
+            'region': '全国',
+            'hotness': 0
+        }
+
+        all_dfs = []
+        error_files = []
+
+        try:
+            # 获取目录下所有CSV文件
+            files = bucket.list_objects(OSS_PATH).object_list
+            csv_files = [f.key for f in files if f.key.endswith('.csv')]
+
+            if not csv_files:
+                st.error("❌ 目录中未找到CSV文件")
+                return pd.DataFrame()
+
+            progress_text = f"正在加载 {len(csv_files)} 个数据源..."
+            progress_bar = st.progress(0, text=progress_text)
+
+            for i, file_path in enumerate(csv_files):
+                try:
+                    # 读取CSV文件
+                    csv_data = bucket.get_object(file_path).read()
+                    df = pd.read_csv(
+                        BytesIO(csv_data),
+                        parse_dates=['date'],
+                        usecols=REQUIRED_COLUMNS
+                    )
+
+                    # 字段校验
+                    missing_cols = set(REQUIRED_COLUMNS) - set(df.columns)
+                    if missing_cols:
+                        raise ValueError(f"缺少必要字段：{', '.join(missing_cols)}")
+
+                    # 添加数据源标识
+                    df['data_source'] = file_path.split('/')[-1]  # 记录文件名
+
+                    # 补充默认值
+                    for col, value in DEFAULT_VALUES.items():
+                        df[col] = value
+
+                    all_dfs.append(df)
+
+                except Exception as e:
+                    error_files.append((file_path, str(e)))
+                finally:
+                    progress_bar.progress((i + 1) / len(csv_files), text=progress_text)
+
+            # 合并数据
+            if not all_dfs:
+                st.error("❌ 所有文件加载失败")
+                return pd.DataFrame()
+
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+
+            # 数据清洗
+            combined_df = (
+                combined_df
+                .dropna(subset=['title', 'url'])
+                .drop_duplicates('url', keep='first')
+                .sort_values('date', ascending=False)
+                .reset_index(drop=True)
+            )
+
+            return combined_df
+
+        except Exception as e:
+            st.error(f"❌ 目录访问失败：{str(e)}")
+            return pd.DataFrame()
+        finally:
+            # 显示加载错误信息
+            if error_files:
+                with st.expander("⚠️ 部分文件加载失败"):
+                    for file, err in error_files:
+                        st.markdown(f"`{file}`: {err}")
+
+    df = load_all_policy_data()
+    if df.empty:
+        st.warning("⚠️ 当前无可用政策数据")
+        return
+
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 1
+
+    with st.expander("🔍 智能筛选", expanded=True):
+        col1, col2 = st.columns([2, 3])
+        with col1:
+            date_range = st.date_input(
+                "📅 日期范围",
+                value=(df['date'].min().date(), df['date'].max().date()),
+                format="YYYY/MM/DD"
+            )
+            sources = st.multiselect(
+                "🏛️ 信息来源",
+                options=df['source'].unique(),
+                placeholder="全部来源"
+            )
+        with col2:
+            keyword = st.text_input(
+                "🔎 关键词搜索",
+                placeholder="标题/内容关键词（支持空格分隔多个关键词）",
+                help="示例：公务员 待遇 调整"
+            )
+            regions = st.multiselect(
+                "🌍 相关地区",
+                options=df['region'].unique(),
+                placeholder="全国范围"
+            )
+
+    sort_col, _ = st.columns([1, 2])
+    with sort_col:
+        sort_option = st.selectbox(
+            "排序方式",
+            options=["最新优先", "最旧优先", "热度排序", "来源分类"],
+            index=0
+        )
+
+    def process_data(df):
+        start_date = pd.Timestamp(date_range[0])
+        end_date = pd.Timestamp(date_range[1])
+        filtered = df[df['date'].between(start_date, end_date)]
+        if sources:
+            filtered = filtered[filtered['source'].isin(sources)]
+        if regions:
+            filtered = filtered[filtered['region'].isin(regions)]
+        if keyword:
+            keywords = [k.strip() for k in keyword.split()]
+            pattern = '|'.join(keywords)
+            filtered = filtered[
+                filtered['title'].str.contains(pattern, case=False) |
+                filtered['summary'].str.contains(pattern, case=False)
+            ]
+        if sort_option == "最新优先":
+            return filtered.sort_values('date', ascending=False)
+        elif sort_option == "最旧优先":
+            return filtered.sort_values('date', ascending=True)
+        elif sort_option == "热度排序":
+            return filtered.sort_values('hotness', ascending=False)
+        else:
+            return filtered.sort_values(['source', 'date'], ascending=[True, False])
+
+    processed_df = process_data(df)
+
+    PAGE_SIZE = 5
+    total_items = len(processed_df)
+    total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    # 翻页按钮
+    col_prev, col_page, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("← 上一页") and st.session_state.current_page > 1:
+            st.session_state.current_page -= 1
+    with col_next:
+        if st.button("下一页 →") and st.session_state.current_page < total_pages:
+            st.session_state.current_page += 1
+    with col_page:
+        st.markdown(
+            f"<div style='text-align: center; padding-top: 8px;'>第 {st.session_state.current_page} 页 / 共 {total_pages} 页</div>",
+            unsafe_allow_html=True
+        )
+
+    # 页码重置逻辑
+    if st.session_state.current_page > total_pages:
+        st.session_state.current_page = total_pages
+
+    start_idx = (st.session_state.current_page - 1) * PAGE_SIZE
+    end_idx = start_idx + PAGE_SIZE
+    current_data = processed_df.iloc[start_idx:end_idx]
+
+    if current_data.empty:
+        st.warning("😢 未找到符合条件的资讯")
+    else:
+        st.markdown(f"""
+            <div style="background: #f0f2f6; padding: 12px; border-radius: 8px; margin: 10px 0;">
+                📊 找到 <strong>{len(processed_df)}</strong> 条结果 | 
+                📅 时间跨度：{date_range[0]} 至 {date_range[1]} | 
+                🌟 平均热度值：{processed_df['hotness'].mean():.1f}
+            </div>
+        """, unsafe_allow_html=True)
+
+        for _, row in current_data.iterrows():
+            with st.container(border=True):
+                # 响应式列布局
+                col1, col2 = st.columns([4, 1], gap="small")
+
+                with col1:
+                    # 增强型可点击标题
+                    st.markdown(f"""
+                        <a href="{row['url']}" target="_blank" 
+                            style="text-decoration: none;
+                                   color: inherit;
+                                   display: block;
+                                   padding: 8px 0;">
+                            <h3 style="margin: 0;
+                                      font-size: 1.2rem;
+                                      line-height: 1.4;
+                                      border-bottom: 2px solid #eee;
+                                      padding-bottom: 8px;">
+                                {row['title']}
+                            </h3>
+                        </a>
+                    """, unsafe_allow_html=True)
+
+                    meta_cols = st.columns([2, 2, 2], gap="small")
+                    with meta_cols[0]:
+                        st.markdown(f"📅 **日期**: {row['date'].strftime('%Y/%m/%d')}")
+                    with meta_cols[1]:
+                        st.markdown(f"🏛️ **来源**: {row['source']}")
+                    with meta_cols[2]:
+                        st.markdown(f"🌍 **地区**: {row['region']}")
+                    with st.expander("📝 查看摘要"):
+                        st.write(row['summary'])
+                with col2:
+                    st.markdown(f"""
+                        <div class="btn-group">
+                            <div class="hotness-value">
+                                🔥 {row['hotness']}
+                            </div>
+                            <div class="btn-group-mobile">
+                                <a href="{row['url']}" 
+                                   target="_blank" 
+                                   class="policy-btn btn-primary">
+                                    🔗 查看原文
+                                </a>
+                                <button onclick="alert('收藏功能需登录后使用')" 
+                                        class="policy-btn btn-secondary">
+                                    ⭐ 收藏
+                                </button>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+    with st.expander("📈 数据洞察", expanded=False):
+        tab1, tab2, tab3 = st.tabs(["来源分析", "时间趋势", "地区分布"])
+
+        with tab1:
+            source_counts = processed_df['source'].value_counts().head(10)
+            st.bar_chart(source_counts)
+
+        with tab2:
+            time_series = processed_df.set_index('date').resample('W').size()
+            st.area_chart(time_series)
+
+        with tab3:
+            region_counts = processed_df['region'].value_counts()
+            fig, ax = plt.subplots(figsize=(8, 8))
+            plt.rcParams['font.sans-serif'] = ['SimHei']
+            plt.rcParams['axes.unicode_minus'] = False
+            region_counts.plot.pie(autopct='%1.1f%%', ax=ax)
+            ax.set_ylabel("")
+            st.pyplot(fig)
+
+        st.download_button(
+            label="📥 导出当前结果（CSV）",
+            data=processed_df.to_csv(index=False).encode('utf-8'),
+            file_name=f"policy_news_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            help="导出当前筛选条件下的所有结果"
+        )
+
+    # 移动端优化样式
+    st.markdown("""
+        <style>
+            /* 通用按钮样式 */
+            .policy-btn {
+                display: block;
+                width: 100%;
+                padding: 8px;
+                border-radius: 20px;
+                text-decoration: none;
+                text-align: center;
+                transition: all 0.3s;
+                margin: 6px 0;
+                font-size: 0.9rem;
+            }
+
+            .hotness-value {
+                font-size: 1.2rem; 
+                color: #ff4b4b;
+                margin: 8px 0;
+                text-align: center;
+            }
+
+            /* 桌面端优化 */
+            @media (min-width: 769px) {
+                .btn-group {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                }
+                .policy-btn {
+                    padding: 8px 16px;
+                }
+            }
+
+            /* 移动端优化 */
+            @media (max-width: 768px) {
+                .btn-group-mobile {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
+                }
+
+                .policy-btn {
+                    font-size: 0.85rem;
+                    padding: 8px 12px;
+                }
+
+                .hotness-value {
+                    font-size: 1rem !important;
+                }
+
+                /* 保持原有移动端优化 */
+                .stContainer {
+                    padding: 0 8px !important;
+                }
+                h3 {
+                    font-size: 1.1rem !important;
+                    line-height: 1.3 !important;
+                }
+                [data-testid="column"] {
+                    padding: 4px !important;
+                }
+                a[target="_blank"] {
+                    padding: 16px 0 !important;
+                    margin: -16px 0 !important;
+                    display: block !important;
+                }
+            }
+
+            /* 主题配色 */
+            .btn-primary {
+                background: #007bff;
+                color: white !important;
+                border: 1px solid #007bff;
+            }
+
+            .btn-secondary {
+                background: #28a745;
+                color: white !important;
+                border: 1px solid #28a745;
+            }
+
+            /* 交互效果 */
+            .policy-btn:hover {
+                opacity: 0.9;
+                transform: translateY(-1px);
+                box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            }
+            a:active, button:active {
+                transform: scale(0.95) !important;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
 # 高分经验模块
 def display_experience():
     st.title("🌟 高分经验")
@@ -380,288 +748,6 @@ def display_experience():
 
     with tab_errors:
         display_files(prefix="错题集/", tab=tab_errors)
-
-# 政策资讯模块
-def display_policy_news():
-    st.title("📰 政策资讯")
-    st.caption("📢 最新公务员政策动态与权威解读")
-    st.markdown("---")
-
-    @st.cache_data(ttl=3600, show_spinner="正在加载最新政策资讯...")
-    def load_policy_data():
-        try:
-            csv_data = bucket.get_object("政策咨询/civilpass_data.csv").read()
-            df = pd.read_csv(
-                BytesIO(csv_data),
-                parse_dates=['date'],
-                usecols=['title', 'source', 'date', 'url']
-            )
-            df = df.dropna(subset=['title', 'url']).drop_duplicates('url')
-            df['summary'] = '暂无摘要'
-            df['region'] = '全国'
-            df['hotness'] = 0
-            return df
-        except Exception as e:
-            st.error(f"❌ 数据加载失败：{str(e)}")
-            return pd.DataFrame()
-
-    df = load_policy_data()
-    if df.empty:
-        return
-
-    if 'current_page' not in st.session_state:
-        st.session_state.current_page = 1
-
-    with st.expander("🔍 智能筛选", expanded=True):
-        col1, col2 = st.columns([2, 3])
-        with col1:
-            date_range = st.date_input(
-                "📅 日期范围",
-                value=(df['date'].min().date(), df['date'].max().date()),
-                format="YYYY/MM/DD"
-            )
-            sources = st.multiselect(
-                "🏛️ 信息来源",
-                options=df['source'].unique(),
-                placeholder="全部来源"
-            )
-        with col2:
-            keyword = st.text_input(
-                "🔎 关键词搜索",
-                placeholder="标题/内容关键词（支持空格分隔多个关键词）",
-                help="示例：公务员 待遇 调整"
-            )
-            regions = st.multiselect(
-                "🌍 相关地区",
-                options=df['region'].unique(),
-                placeholder="全国范围"
-            )
-
-    sort_col, _ = st.columns([1, 2])
-    with sort_col:
-        sort_option = st.selectbox(
-            "排序方式",
-            options=["最新优先", "最旧优先", "热度排序", "来源分类"],
-            index=0
-        )
-
-    def process_data(df):
-        start_date = pd.Timestamp(date_range[0])
-        end_date = pd.Timestamp(date_range[1])
-        filtered = df[df['date'].between(start_date, end_date)]
-        if sources:
-            filtered = filtered[filtered['source'].isin(sources)]
-        if regions:
-            filtered = filtered[filtered['region'].isin(regions)]
-        if keyword:
-            keywords = [k.strip() for k in keyword.split()]
-            pattern = '|'.join(keywords)
-            filtered = filtered[
-                filtered['title'].str.contains(pattern, case=False) |
-                filtered['summary'].str.contains(pattern, case=False)
-            ]
-        if sort_option == "最新优先":
-            return filtered.sort_values('date', ascending=False)
-        elif sort_option == "最旧优先":
-            return filtered.sort_values('date', ascending=True)
-        elif sort_option == "热度排序":
-            return filtered.sort_values('hotness', ascending=False)
-        else:
-            return filtered.sort_values(['source', 'date'], ascending=[True, False])
-
-    processed_df = process_data(df)
-
-    PAGE_SIZE = 5
-    total_items = len(processed_df)
-    total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
-
-    # 翻页按钮
-    col_prev, col_page, col_next = st.columns([1, 2, 1])
-    with col_prev:
-        if st.button("← 上一页") and st.session_state.current_page > 1:
-            st.session_state.current_page -= 1
-    with col_next:
-        if st.button("下一页 →") and st.session_state.current_page < total_pages:
-            st.session_state.current_page += 1
-    with col_page:
-        st.markdown(
-            f"<div style='text-align: center; padding-top: 8px;'>第 {st.session_state.current_page} 页 / 共 {total_pages} 页</div>",
-            unsafe_allow_html=True
-        )
-
-    # 页码重置逻辑
-    if st.session_state.current_page > total_pages:
-        st.session_state.current_page = total_pages
-
-    start_idx = (st.session_state.current_page - 1) * PAGE_SIZE
-    end_idx = start_idx + PAGE_SIZE
-    current_data = processed_df.iloc[start_idx:end_idx]
-
-    if current_data.empty:
-        st.warning("😢 未找到符合条件的资讯")
-    else:
-        st.markdown(f"""
-            <div style="background: #f0f2f6; padding: 12px; border-radius: 8px; margin: 10px 0;">
-                📊 找到 <strong>{len(processed_df)}</strong> 条结果 | 
-                📅 时间跨度：{date_range[0]} 至 {date_range[1]} | 
-                🌟 平均热度值：{processed_df['hotness'].mean():.1f}
-            </div>
-        """, unsafe_allow_html=True)
-
-        for _, row in current_data.iterrows():
-            with st.container(border=True):
-                # 响应式列布局
-                col1, col2 = st.columns([4, 1], gap="small")
-
-                with col1:
-                    # 增强型可点击标题
-                    st.markdown(f"""
-                        <a href="{row['url']}" target="_blank" 
-                            style="text-decoration: none;
-                                   color: inherit;
-                                   display: block;
-                                   padding: 8px 0;">
-                            <h3 style="margin: 0;
-                                      font-size: 1.2rem;
-                                      line-height: 1.4;
-                                      border-bottom: 2px solid #eee;
-                                      padding-bottom: 8px;">
-                                {row['title']}
-                            </h3>
-                        </a>
-                    """, unsafe_allow_html=True)
-
-                    meta_cols = st.columns([2, 2, 2], gap="small")
-                    with meta_cols[0]:
-                        st.markdown(f"📅 **日期**: {row['date'].strftime('%Y/%m/%d')}")
-                    with meta_cols[1]:
-                        st.markdown(f"🏛️ **来源**: {row['source']}")
-                    with meta_cols[2]:
-                        st.markdown(f"🌍 **地区**: {row['region']}")
-                    with st.expander("📝 查看摘要"):
-                        st.write(row['summary'])
-                with col2:
-                    # 交互按钮组
-                    st.markdown(f"""
-                        <div style="text-align: center;
-                                  padding: 8px;
-                                  background: #f8f9fa;
-                                  border-radius: 12px;">
-                            <div style="font-size: 1.2rem; 
-                                      color: #ff4b4b;
-                                      margin: 8px 0;">
-                                🔥 {row['hotness']}
-                            </div>
-                            <a href="{row['url']}" 
-                               target="_blank" 
-                               style="display: block;
-                                      padding: 10px;
-                                      background: #007bff;
-                                      color: white;
-                                      border-radius: 25px;
-                                      text-decoration: none;
-                                      margin: 8px 0;
-                                      transition: all 0.3s;"
-                               onmouseover="this.style.transform='scale(1.05)'" 
-                               onmouseout="this.style.transform='scale(1)'">
-                                🔗 查看原文
-                            </a>
-                            <button onclick="alert('收藏功能需登录后使用')" 
-                                    style="width: 100%;
-                                           padding: 10px;
-                                           border: none;
-                                           border-radius: 25px;
-                                           background: #28a745;
-                                           color: white;
-                                           margin: 8px 0;
-                                           cursor: pointer;
-                                           transition: all 0.3s;"
-                                    onmouseover="this.style.transform='scale(1.05)'" 
-                                    onmouseout="this.style.transform='scale(1)'">
-                                ⭐ 收藏
-                            </button>
-                        </div>
-                    """, unsafe_allow_html=True)
-
-    with st.expander("📈 数据洞察", expanded=False):
-        tab1, tab2, tab3 = st.tabs(["来源分析", "时间趋势", "地区分布"])
-
-        with tab1:
-            source_counts = processed_df['source'].value_counts().head(10)
-            st.bar_chart(source_counts)
-
-        with tab2:
-            time_series = processed_df.set_index('date').resample('W').size()
-            st.area_chart(time_series)
-
-        with tab3:
-            region_counts = processed_df['region'].value_counts()
-            fig, ax = plt.subplots(figsize=(8, 8))
-            plt.rcParams['font.sans-serif'] = ['SimHei']
-            plt.rcParams['axes.unicode_minus'] = False
-            region_counts.plot.pie(autopct='%1.1f%%', ax=ax)
-            ax.set_ylabel("")
-            st.pyplot(fig)
-
-        st.download_button(
-            label="📥 导出当前结果（CSV）",
-            data=processed_df.to_csv(index=False).encode('utf-8'),
-            file_name=f"policy_news_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            help="导出当前筛选条件下的所有结果"
-        )
-
-    # 移动端优化样式
-    st.markdown("""
-        <style>
-            /* 基础优化 */
-            a { transition: all 0.3s; }
-
-            /* 移动端适配 */
-            @media (max-width: 768px) {
-                /* 容器优化 */
-                .stContainer {
-                    padding: 0 8px !important;
-                }
-
-                /* 标题优化 */
-                h3 {
-                    font-size: 1.1rem !important;
-                    line-height: 1.3 !important;
-                }
-
-                /* 按钮优化 */
-                .stButton > button {
-                    width: 100% !important;
-                    padding: 12px !important;
-                }
-
-                /* 元信息列布局 */
-                [data-testid="column"] {
-                    padding: 4px !important;
-                }
-
-                /* 增大点击区域 */
-                a[target="_blank"] {
-                    padding: 16px 0 !important;
-                    margin: -16px 0 !important;
-                    display: block !important;
-                }
-
-                /* 交互反馈 */
-                a:active, button:active {
-                    transform: scale(0.95) !important;
-                }
-            }
-
-            /* 桌面端优化 */
-            @media (min-width: 769px) {
-                .stButton > button {
-                    min-width: 120px;
-                }
-            }
-        </style>
-    """, unsafe_allow_html=True)
 
 #考试日历模块
 def display_exam_calendar():
