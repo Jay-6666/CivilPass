@@ -176,28 +176,149 @@ def showLLMChatbot():
     st.caption("📢 输入你的公考问题，或上传试题截图，AI 帮你解答！")
     st.markdown("---")
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        info = st.text_input("✍️ 问题输入", placeholder="请在此输入你的问题...", label_visibility="visible")
-    with col2:
-        uploaded_file = st.file_uploader("📷 上传试题图片", type=["jpg", "png", "jpeg"])
+    # 初始化会话状态
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    if 'current_input' not in st.session_state:
+        st.session_state.current_input = ''
+    if 'editing_index' not in st.session_state:
+        st.session_state.editing_index = -1
 
+    # 聊天记录容器
+    chat_container = st.container()
+
+    # 固定在底部的输入容器
+    input_container = st.container()
+
+    # 自定义CSS样式
+    st.markdown("""
+    <style>
+    /* 主内容区底部留白 */
+    .main .block-container {
+        padding-bottom: 160px !important;
+    }
+
+    /* 固定输入区域 */
+    div[data-testid="stHorizontalBlock"]:has(> div:last-child:has(button[kind="primary"])) {
+        position: fixed !important;
+        bottom: 30px;
+        left: 2rem;
+        right: 2rem;
+        background: white;
+        z-index: 999;
+        padding: 1rem;
+        box-shadow: 0 -4px 12px rgba(0,0,0,0.1);
+        border-radius: 12px;
+        border: 1px solid #eee;
+    }
+
+    /* 调整文件上传器样式 */
+    div[data-testid="stFileUploader"] {
+        margin-top: 8px !important;
+    }
+
+    /* 优化代码块复制按钮 */
+    div[data-testid="stCodeBlock"] > div:first-child {
+        padding-right: 2.5em !important;
+    }
+
+    div[data-testid="stCodeBlock"] button {
+        opacity: 0.6 !important;
+        transition: opacity 0.2s !important;
+    }
+
+    div[data-testid="stCodeBlock"] button:hover {
+        opacity: 1 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # 显示聊天记录
+    with chat_container:
+        for index, message in enumerate(st.session_state.messages):
+            role = message['role']
+            content = message['content']
+            image_url = message.get('image_url')
+
+            cols = st.columns([0.85, 0.15])
+            with cols[0]:
+                with st.chat_message(role):
+                    if role == "assistant":
+                        st.code(content, language="markdown")  # 自带复制按钮
+                    else:
+                        st.markdown(content)
+
+                    if image_url and role == "user":
+                        st.image(image_url, caption="🖼 已上传图片", use_column_width=True)
+
+            if role == "user":
+                with cols[1]:
+                    if st.button("✏️", key=f"edit_{index}"):
+                        st.session_state.current_input = content
+                        st.session_state.editing_index = index
+
+    # 固定在底部的输入区域
+    with input_container:
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            info = st.text_input(
+                "✍️ 问题输入",
+                placeholder="请在此输入你的问题...",
+                value=st.session_state.current_input,
+                key="user_input",
+                label_visibility="visible"
+            )
+        with col2:
+            uploaded_file = st.file_uploader(
+                "📷 上传试题图片",
+                type=["jpg", "png", "jpeg"],
+                key="current_uploader"
+            )
+
+        submit = st.button("🚀 获取 AI 答案", use_container_width=True)
+
+    # 处理图片上传
     image_url = None
     if uploaded_file:
-        st.image(uploaded_file, caption="🖼 已上传图片", use_column_width=True)
         with st.spinner("🔄 正在上传图片..."):
             image_url = upload_file_to_oss(uploaded_file, category="civilpass/images")
         if image_url:
             st.success("✅ 图片上传成功！")
 
-    if st.button("🚀 获取 AI 答案", use_container_width=True):
+    # 处理提交逻辑
+    if submit:
         if not info and not image_url:
             st.warning("⚠️ 请填写问题或上传图片")
         else:
-            chat_message(info if info else "（仅上传图片）", is_user=True)
+            # 处理编辑模式
+            if st.session_state.editing_index != -1:
+                del st.session_state.messages[st.session_state.editing_index:]
+                st.session_state.editing_index = -1
+
+            # 添加用户消息
+            user_content = info if info else "（仅上传图片）"
+            user_message = {
+                'role': 'user',
+                'content': user_content,
+                'image_url': image_url
+            }
+            st.session_state.messages.append(user_message)
+
+            # 获取AI响应
             with st.spinner("🤖 AI 正在解析中..."):
-                answer = query_qwen_api(info, image_url)
-            chat_message(answer, is_user=False)
+                answer = query_qwen_api(user_content, image_url)
+
+            # 添加AI消息
+            ai_message = {
+                'role': 'assistant',
+                'content': answer
+            }
+            st.session_state.messages.append(ai_message)
+
+            # 自动清除输入状态
+            st.session_state.current_input = ''
+            st.session_state.uploaded_file = None
+            st.rerun()
 
 # 备考资料模块
 def display_study_materials():
