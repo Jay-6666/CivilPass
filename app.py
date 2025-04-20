@@ -15,6 +15,7 @@ import streamlit as st
 from PIL import Image
 from dotenv import load_dotenv
 import jinja2
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 # 环境变量读取
 load_dotenv()
@@ -30,6 +31,18 @@ ENDPOINT = f"https://{BUCKET_NAME}.oss-{REGION}.aliyuncs.com"
 # OSS 初始化
 auth = oss2.Auth(ACCESS_KEY_ID, ACCESS_KEY_SECRET)
 bucket = oss2.Bucket(auth, f"http://oss-{REGION}.aliyuncs.com", BUCKET_NAME)
+
+# 添加设备检测函数
+def is_mobile():
+    """通过浏览器 User-Agent 自动检测移动端设备"""
+    try:
+        ctx = get_script_run_ctx()
+        if ctx is None:
+            return False
+        user_agent = ctx.request.headers.get("User-Agent", "").lower()
+        return any(keyword in user_agent for keyword in ["mobi", "android", "iphone"])
+    except Exception:
+        return False  # 异常时默认返回非移动端
 
 # 夜晚模式
 def set_dark_mode(dark: bool):
@@ -281,12 +294,12 @@ def showLLMChatbot():
                         st.markdown(content)
 
                     if image_url and role == "user":
-                        st.image(image_url, caption="🖼 已上传图片", use_column_width=True)
+                        st.image(image_url, caption="🖼 已上传图片", use_container_width=True)
 
             # 编辑按钮
             if role == "user":
                 with cols[1]:
-                    btn_style = "mobile-edit-btn" if st.secrets.get("IS_MOBILE") else "desktop-edit-btn"
+                    btn_style = "mobile-edit-btn" if is_mobile() else "desktop-edit-btn"
                     if st.button("✏️",
                                  key=f"edit_{index}",
                                  help="编辑此问题",
@@ -299,7 +312,7 @@ def showLLMChatbot():
     input_container = st.container()
     with input_container:
         # 响应式列布局
-        col1, col2 = st.columns([2, 1]) if not st.secrets.get("IS_MOBILE") else st.columns([1])
+        col1, col2 = st.columns([2, 1]) if not is_mobile() else st.columns([1])
 
         with col1:
             info = st.text_input(
@@ -307,11 +320,11 @@ def showLLMChatbot():
                 placeholder="请输入您的问题...",
                 value=st.session_state.current_input,
                 key="user_input",
-                label_visibility="visible" if not st.secrets.get("IS_MOBILE") else "collapsed"
+                label_visibility="visible" if not is_mobile() else "collapsed"
             )
 
         # 移动端独立显示上传按钮
-        if st.secrets.get("IS_MOBILE"):
+        if is_mobile():
             with st.container():
                 uploaded_file = st.file_uploader(
                     "📷 上传试题图片",
@@ -409,7 +422,7 @@ def display_study_materials():
                         continue
                     st.markdown(f"📄 **{file_name}**")
                 elif file_name.endswith((".jpg", ".jpeg", ".png")):
-                    st.image(BytesIO(file_data), caption=file_name, use_column_width=True)
+                    st.image(BytesIO(file_data), caption=file_name, use_container_width=True)
 
                 st.markdown(f"[📥 下载]({file_url})")
                 st.markdown("---")
@@ -879,7 +892,7 @@ def display_experience():
                         if file_info["type"] == "image":
                             img_data = get_cached_oss_object(obj.key)
                             st.image(BytesIO(img_data),
-                                     use_column_width=True,
+                                     use_container_width=True,
                                      caption=file_info["display"])
                         else:
                             # PDF显示带文件名
@@ -1044,7 +1057,7 @@ def display_exam_calendar():
                         with cols[img_idx % 2]:
                             with st.popover(f"📷 {img['name'].split('.')[0]}"):
                                 img_data = get_cached_oss_object(img['key'])
-                                st.image(BytesIO(img_data), use_column_width=True)
+                                st.image(BytesIO(img_data), use_container_width=True)
                                 st.download_button(
                                     "下载原图",
                                     data=img_data,
@@ -1126,7 +1139,7 @@ def admin_upload_center():
     st.markdown("---")
 
     password = st.text_input("🔐 输入管理员密码", type="password")
-    if password != "cjl20030623":
+    if password != "00277":
         st.warning("🔒 密码错误，无法访问上传功能")
         return
 
