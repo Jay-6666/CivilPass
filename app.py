@@ -1,20 +1,25 @@
 import base64
 import json
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import datetime
 from io import BytesIO
 
+import jinja2
 import matplotlib.pyplot as plt
-from matplotlib import font_manager
+import networkx as nx
 import openai
 import oss2
 import pandas as pd
 import streamlit as st
-from PIL import Image
+import streamlit.components.v1 as components
+import torch
 from dotenv import load_dotenv
-import jinja2
+from matplotlib import font_manager
+from PIL import Image
+from pyvis.network import Network
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 # 环境变量读取
@@ -32,6 +37,7 @@ ENDPOINT = f"https://{BUCKET_NAME}.oss-{REGION}.aliyuncs.com"
 auth = oss2.Auth(ACCESS_KEY_ID, ACCESS_KEY_SECRET)
 bucket = oss2.Bucket(auth, f"http://oss-{REGION}.aliyuncs.com", BUCKET_NAME)
 
+
 # 添加设备检测函数
 def is_mobile():
     """通过浏览器 User-Agent 自动检测移动端设备"""
@@ -44,10 +50,12 @@ def is_mobile():
     except Exception:
         return False  # 异常时默认返回非移动端
 
+
 # 夜晚模式
 def set_dark_mode(dark: bool):
     if dark:
-        st.markdown("""
+        st.markdown(
+            """
             <style>
                 body, .stApp {
                     background-color: #1E1F29;
@@ -124,7 +132,10 @@ def set_dark_mode(dark: bool):
                 }
 
             </style>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
+
 
 # 消息气泡 UI
 def chat_message(message, is_user=True):
@@ -133,14 +144,18 @@ def chat_message(message, is_user=True):
     bg_color = "#0E76FD" if is_user else "#2E2E2E"
     text_color = "#FFFFFF" if is_user else "#DDDDDD"
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
         <div style='display: flex; justify-content: {alignment}; margin: 10px 0;'>
             <div style='background-color: {bg_color}; color: {text_color}; padding: 10px 15px;
                         border-radius: 12px; max-width: 70%;'>
                 <strong>{avatar}</strong> {message}
             </div>
         </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
+
 
 # 缓存 OSS 内容
 @st.cache_data(show_spinner=False)
@@ -149,6 +164,7 @@ def get_cached_oss_object(key):
         return bucket.get_object(key).read()
     except Exception:
         return None
+
 
 # 上传文件
 def upload_file_to_oss(file, category="public"):
@@ -159,7 +175,7 @@ def upload_file_to_oss(file, category="public"):
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
         ".png": "image/png",
-        ".mp4": "video/mp4"
+        ".mp4": "video/mp4",
     }
     headers = {"Content-Type": content_type_map.get(ext, "application/octet-stream")}
     try:
@@ -169,19 +185,280 @@ def upload_file_to_oss(file, category="public"):
         st.error(f"❌ 上传失败: {e}")
         return None
 
+
 # 千问 API
 def query_qwen_api(user_input, image_url=None):
+    """调用千问 API，要求 AI 用自然语言回答 + 追加 JSON 格式知识图谱，支持图文输入"""
     client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
-    messages = [{"role": "user", "content": []}]
-    if user_input:
-        messages[0]["content"].append({"type": "text", "text": user_input})
-    if image_url:
-        messages[0]["content"].append({"type": "image_url", "image_url": {"url": image_url}})
+
+    # 更自然的系统提示词（无 markdown / 无列表）
+    system_prompt = """
+你是公务员考试领域的专家，请针对用户提出的问题，像专家讲解一样，用自然、连贯的语言进行清晰解答。
+
+要求：
+1. 使用自然书面语言，逻辑通顺、语言简洁，无需使用 markdown、标题、编号或列表等格式符号。
+2. 回答完毕后，请追加输出一个结构清晰的“知识图谱”数据（使用 JSON 格式）。
+
+知识图谱数据格式如下：
+```json
+{
+  "knowledge_graph": {
+    "nodes": [
+      {"id": 1, "label": "核心概念", "description": "...", "color": "#4CAF50"},
+      {"id": 2, "label": "相关法规", "description": "...", "shape": "diamond"}
+    ],
+    "edges": [
+      {"from": 1, "to": 2, "relation": "依据", "width": 2}
+    ]
+  }
+}
+请严格按照上述格式返回。 """
+
+    # 关键词判断图形推理题，追加图形专属提示
+    graphic_keywords = ["图形", "规律", "边数", "颜色", "旋转", "对称", "排列"]
+    if any(kw in user_input for kw in graphic_keywords):
+        system_prompt += """
+    本题属于【图形推理类】，请在构建知识图谱时，考虑如下维度：
+
+    节点应包括：图形推理、形状变化、颜色规律、位置排列、对称性 等
+
+    边的关系建议使用：“包含”“体现”“遵循”“变化为” 等清晰语义
+
+    所有节点尽量有说明字段（description），便于理解
+
+    构建一个结构严谨、内容完整的图形推理知识图谱。 """
+
     try:
+        # 构建消息结构
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": []},
+        ]
+
+        if user_input:
+            messages[1]["content"].append({"type": "text", "text": user_input})
+        if image_url:
+            messages[1]["content"].append(
+                {"type": "image_url", "image_url": {"url": image_url}}
+            )
+
+        # 调用千问模型
         completion = client.chat.completions.create(model=MODEL_NAME, messages=messages)
         return completion.choices[0].message.content
+
     except Exception as e:
         return f"❌ AI 解析失败: {str(e)}"
+
+
+import json
+import re
+
+
+# 拆分回答文本 和 图谱 JSON 部分
+def split_answer_and_graph(raw_output):
+    pattern = r"```json(.*?)```"
+    match = re.search(pattern, raw_output, re.DOTALL)
+
+    if match:
+        json_block = match.group(1).strip()
+        text_part = raw_output[: match.start()].strip()
+        return text_part, json_block
+    else:
+        return raw_output.strip(), None
+
+
+# 自然语言回答展示组件（可滚动）
+def show_answer_scrollable(answer):
+    st.markdown(
+        f"""
+        <div style="max-height: 400px; overflow-y: auto; padding: 12px; border: 1px solid #ccc; background-color: #fdfdfd; border-radius: 6px;">
+            <p style="line-height: 1.6; font-size: 16px;">{answer}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+import hanlp
+
+hanlp_pipeline = hanlp.load("FINE_ELECTRA_SMALL_ZH")  # 中文 NER 模型
+
+
+def extract_knowledge_graph(answer):
+    """
+    若是图形推理类问题，构建专属图谱；否则使用实体识别构建通用图谱。
+    """
+
+    # Step 1：尝试解析 AI 自带的知识图谱
+    try:
+        pattern = r"```json(.*?)```"
+        match = re.search(pattern, answer, re.DOTALL)
+        if match:
+            kg_data = json.loads(match.group(1).strip())
+            return (
+                kg_data["knowledge_graph"]["nodes"],
+                kg_data["knowledge_graph"]["edges"],
+            )
+    except Exception as e:
+        pass  # 不展示 warning，交给后续自动生成
+
+    # Step 2：判断是否是图形推理类问题
+    graphic_keywords = ["图形", "推理", "变化", "颜色", "边数", "规律", "对称", "旋转", "排列"]
+    if any(kw in answer for kw in graphic_keywords):
+        # Step 3：构建图形推理专用知识图谱
+        nodes = [
+            {
+                "id": 1,
+                "label": "图形推理",
+                "description": "通过图形规律推断结果",
+                "color": "#4CAF50",
+                "shape": "star",
+            },
+            {
+                "id": 2,
+                "label": "形状变化",
+                "description": "边数/结构的变化模式",
+                "color": "#03A9F4",
+                "shape": "box",
+            },
+            {
+                "id": 3,
+                "label": "颜色规律",
+                "description": "颜色轮换/重复/渐变",
+                "color": "#FFC107",
+                "shape": "triangle",
+            },
+            {
+                "id": 4,
+                "label": "位置排列",
+                "description": "图形在空间位置的变化",
+                "color": "#E91E63",
+                "shape": "diamond",
+            },
+            {
+                "id": 5,
+                "label": "对称性",
+                "description": "轴对称/中心对称等形式",
+                "color": "#9C27B0",
+                "shape": "ellipse",
+            },
+        ]
+        edges = [
+            {"from": 1, "to": 2, "relation": "包含"},
+            {"from": 1, "to": 3, "relation": "包含"},
+            {"from": 1, "to": 4, "relation": "包含"},
+            {"from": 1, "to": 5, "relation": "包含"},
+        ]
+        return nodes, edges
+
+    # Step 4：非图形推理题，回退 HanLP NER 模式
+    ner_result = hanlp_pipeline(answer)
+    entities = ner_result.get("ner/msra", [])
+    if not entities:
+        return [], []
+
+    entity_types = {"PER": "人物", "ORG": "组织", "LOC": "地点", "TIME": "时间"}
+    shape_map = {"PER": "dot", "ORG": "box", "LOC": "triangle", "TIME": "ellipse"}
+    color_map = {
+        "PER": "#03a9f4",
+        "ORG": "#4caf50",
+        "LOC": "#ff9800",
+        "TIME": "#ab47bc",
+    }
+
+    nodes = []
+    node_id_map = {}
+    for idx, (text, ent_type, start, end) in enumerate(entities):
+        node_id = idx + 1
+        nodes.append(
+            {
+                "id": node_id,
+                "label": text,
+                "description": f"{entity_types.get(ent_type, '实体')}：{text}",
+                "color": color_map.get(ent_type, "#9e9e9e"),
+                "shape": shape_map.get(ent_type, "ellipse"),
+                "group": ent_type,
+                "size": 28,
+            }
+        )
+        node_id_map[text] = node_id
+
+    # 简单共现关系构建
+    edges = []
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            edges.append(
+                {
+                    "from": nodes[i]["id"],
+                    "to": nodes[j]["id"],
+                    "relation": "共现",
+                    "color": "#ccc",
+                    "width": 1,
+                }
+            )
+
+    return nodes, edges
+
+
+from pyvis.network import Network
+
+
+def generate_kg_html(nodes, edges):
+    net = Network(height="550px", width="100%", bgcolor="#ffffff", font_color="#333")
+
+    # 高级美化设置
+    net.set_options(
+        """
+    {
+      "physics": {
+        "barnesHut": {
+          "gravitationalConstant": -2500,
+          "centralGravity": 0.3,
+          "springLength": 200,
+          "springConstant": 0.04,
+          "damping": 0.09
+        }
+      },
+      "interaction": {
+        "hover": true,
+        "navigationButtons": true,
+        "tooltipDelay": 200
+      },
+      "nodes": {
+        "font": {"size": 16, "face": "arial"},
+        "shadow": true
+      },
+      "edges": {
+        "color": {"inherit": true},
+        "smooth": true
+      }
+    }
+    """
+    )
+
+    for node in nodes:
+        net.add_node(
+            n_id=node.get("id"),
+            label=node.get("label"),
+            title=node.get("description", "无详细说明"),
+            color=node.get("color", "#4CAF50"),
+            shape=node.get("shape", "ellipse"),
+            group=node.get("group", None),
+            size=node.get("size", 25),
+        )
+
+    for edge in edges:
+        net.add_edge(
+            edge.get("from"),
+            edge.get("to"),
+            title=edge.get("relation", "关联"),
+            width=edge.get("width", 1),
+            color=edge.get("color", "#aaa"),
+            arrows="to" if edge.get("direction", False) else "",
+        )
+
+    return net.generate_html()
+
 
 # 智能问答模块
 def showLLMChatbot():
@@ -190,18 +467,19 @@ def showLLMChatbot():
     st.markdown("---")
 
     # 初始化会话状态
-    if 'messages' not in st.session_state:
+    if "messages" not in st.session_state:
         st.session_state.messages = []
-    if 'current_input' not in st.session_state:
-        st.session_state.current_input = ''
-    if 'editing_index' not in st.session_state:
+    if "current_input" not in st.session_state:
+        st.session_state.current_input = ""
+    if "editing_index" not in st.session_state:
         st.session_state.editing_index = -1
 
     # 聊天记录容器
     chat_container = st.container()
 
     # 自定义响应式CSS
-    st.markdown("""
+    st.markdown(
+        """
     <style>
     /* 基础布局 */
     .main .block-container {
@@ -274,24 +552,74 @@ def showLLMChatbot():
         min-width: 36px !important;
         min-height: 36px !important;
     }
+    <style>
+    /* 知识图谱容器 */
+    .pyvis-network {
+        border: 1px solid #eee !important;
+        border-radius: 10px;
+        margin: 1rem 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    /* 节点样式 */
+    .node {
+        transition: all 0.3s ease !important;
+    }
+    .node:hover {
+        filter: brightness(1.1);
+        transform: scale(1.05);
+    }
+
+    /* 移动端优化 */
+    @media (max-width: 767px) {
+        .pyvis-network {
+            height: 300px !important;
+        }
+        .node-label {
+            font-size: 12px !important;
+        }
+    }
+
+    /* 展开面板动画 */
+    .streamlit-expanderContent {
+        animation: kgSlideIn 0.3s ease-out;
+    }
+
+    @keyframes kgSlideIn {
+        0% { opacity: 0; transform: translateY(-10px); }
+        100% { opacity: 1; transform: translateY(0); }
+    }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     # 显示聊天记录
     with chat_container:
         for index, message in enumerate(st.session_state.messages):
-            role = message['role']
-            content = message['content']
-            image_url = message.get('image_url')
+            role = message["role"]
+            content = message["content"]
+            image_url = message.get("image_url")
 
             # 响应式列布局
             cols = st.columns([0.85, 0.15])
             with cols[0]:
                 with st.chat_message(role):
                     if role == "assistant":
-                        st.code(content, language="markdown")  # 自带复制按钮
-                    else:
-                        st.markdown(content)
+                        text_part, kg_json_str = split_answer_and_graph(content)
+                        show_answer_scrollable(text_part)
+
+                        if kg_json_str:
+                            try:
+                                kg_data = json.loads(kg_json_str)
+                                nodes = kg_data["knowledge_graph"]["nodes"]
+                                edges = kg_data["knowledge_graph"]["edges"]
+                                st.markdown("### 📊 关联知识图谱")
+                                with st.expander("点击探索知识点关系", expanded=False):
+                                    kg_html = generate_kg_html(nodes, edges)
+                                    components.html(kg_html, height=400)
+                            except Exception as e:
+                                st.warning("❌ 知识图谱结构解析失败")
 
                     if image_url and role == "user":
                         st.image(image_url, caption="🖼 已上传图片", use_container_width=True)
@@ -300,11 +628,13 @@ def showLLMChatbot():
             if role == "user":
                 with cols[1]:
                     btn_style = "mobile-edit-btn" if is_mobile() else "desktop-edit-btn"
-                    if st.button("✏️",
-                                 key=f"edit_{index}",
-                                 help="编辑此问题",
-                                 use_container_width=True,
-                                 type="secondary"):
+                    if st.button(
+                            "✏️",
+                            key=f"edit_{index}",
+                            help="编辑此问题",
+                            use_container_width=True,
+                            type="secondary",
+                    ):
                         st.session_state.current_input = content
                         st.session_state.editing_index = index
 
@@ -320,29 +650,23 @@ def showLLMChatbot():
                 placeholder="请输入您的问题...",
                 value=st.session_state.current_input,
                 key="user_input",
-                label_visibility="visible" if not is_mobile() else "collapsed"
+                label_visibility="visible" if not is_mobile() else "collapsed",
             )
 
         # 移动端独立显示上传按钮
         if is_mobile():
             with st.container():
                 uploaded_file = st.file_uploader(
-                    "📷 上传试题图片",
-                    type=["jpg", "png", "jpeg"],
-                    key="mobile_uploader"
+                    "📷 上传试题图片", type=["jpg", "png", "jpeg"], key="mobile_uploader"
                 )
         else:
             with col2:
                 uploaded_file = st.file_uploader(
-                    "📷 上传试题图片",
-                    type=["jpg", "png", "jpeg"],
-                    key="desktop_uploader"
+                    "📷 上传试题图片", type=["jpg", "png", "jpeg"], key="desktop_uploader"
                 )
 
         # 提交按钮
-        submit = st.button("🚀 获取 AI 答案",
-                           use_container_width=True,
-                           type="primary")
+        submit = st.button("🚀 获取 AI 答案", use_container_width=True, type="primary")
 
     # 图片上传处理
     image_url = None
@@ -365,9 +689,9 @@ def showLLMChatbot():
             # 添加用户消息
             user_content = info if info else "（仅上传图片）"
             user_message = {
-                'role': 'user',
-                'content': user_content,
-                'image_url': image_url
+                "role": "user",
+                "content": user_content,
+                "image_url": image_url,
             }
             st.session_state.messages.append(user_message)
 
@@ -376,16 +700,14 @@ def showLLMChatbot():
                 answer = query_qwen_api(user_content, image_url)
 
             # 添加AI消息
-            ai_message = {
-                'role': 'assistant',
-                'content': answer
-            }
+            ai_message = {"role": "assistant", "content": answer}
             st.session_state.messages.append(ai_message)
 
             # 重置输入状态
-            st.session_state.current_input = ''
+            st.session_state.current_input = ""
             st.session_state.uploaded_file = None
             st.rerun()
+
 
 # 备考资料模块
 def display_study_materials():
@@ -422,13 +744,16 @@ def display_study_materials():
                         continue
                     st.markdown(f"📄 **{file_name}**")
                 elif file_name.endswith((".jpg", ".jpeg", ".png")):
-                    st.image(BytesIO(file_data), caption=file_name, use_container_width=True)
+                    st.image(
+                        BytesIO(file_data), caption=file_name, use_container_width=True
+                    )
 
                 st.markdown(f"[📥 下载]({file_url})")
                 st.markdown("---")
                 count += 1
         except Exception as e:
             st.error(f"❌ 加载失败：{e}")
+
 
 # 政策资讯模块
 def display_policy_news():
@@ -440,12 +765,8 @@ def display_policy_news():
     def load_all_policy_data():
         # 配置参数（可提取到配置文件）
         OSS_PATH = "政策咨询"  # OSS存储路径
-        REQUIRED_COLUMNS = ['title', 'source', 'date', 'url']  # 必要字段
-        DEFAULT_VALUES = {  # 默认值配置
-            'summary': '暂无摘要',
-            'region': '全国',
-            'hotness': 0
-        }
+        REQUIRED_COLUMNS = ["title", "source", "date", "url"]  # 必要字段
+        DEFAULT_VALUES = {"summary": "暂无摘要", "region": "全国", "hotness": 0}  # 默认值配置
 
         all_dfs = []
         error_files = []
@@ -453,7 +774,7 @@ def display_policy_news():
         try:
             # 获取目录下所有CSV文件
             files = bucket.list_objects(OSS_PATH).object_list
-            csv_files = [f.key for f in files if f.key.endswith('.csv')]
+            csv_files = [f.key for f in files if f.key.endswith(".csv")]
 
             if not csv_files:
                 st.error("❌ 目录中未找到CSV文件")
@@ -468,8 +789,8 @@ def display_policy_news():
                     csv_data = bucket.get_object(file_path).read()
                     df = pd.read_csv(
                         BytesIO(csv_data),
-                        parse_dates=['date'],
-                        usecols=REQUIRED_COLUMNS
+                        parse_dates=["date"],
+                        usecols=REQUIRED_COLUMNS,
                     )
 
                     # 字段校验
@@ -478,7 +799,7 @@ def display_policy_news():
                         raise ValueError(f"缺少必要字段：{', '.join(missing_cols)}")
 
                     # 添加数据源标识
-                    df['data_source'] = file_path.split('/')[-1]  # 记录文件名
+                    df["data_source"] = file_path.split("/")[-1]  # 记录文件名
 
                     # 补充默认值
                     for col, value in DEFAULT_VALUES.items():
@@ -500,10 +821,9 @@ def display_policy_news():
 
             # 数据清洗
             combined_df = (
-                combined_df
-                .dropna(subset=['title', 'url'])
-                .drop_duplicates('url', keep='first')
-                .sort_values('date', ascending=False)
+                combined_df.dropna(subset=["title", "url"])
+                .drop_duplicates("url", keep="first")
+                .sort_values("date", ascending=False)
                 .reset_index(drop=True)
             )
 
@@ -524,7 +844,7 @@ def display_policy_news():
         st.warning("⚠️ 当前无可用政策数据")
         return
 
-    if 'current_page' not in st.session_state:
+    if "current_page" not in st.session_state:
         st.session_state.current_page = 1
 
     with st.expander("🔍 智能筛选", expanded=True):
@@ -532,57 +852,49 @@ def display_policy_news():
         with col1:
             date_range = st.date_input(
                 "📅 日期范围",
-                value=(df['date'].min().date(), df['date'].max().date()),
-                format="YYYY/MM/DD"
+                value=(df["date"].min().date(), df["date"].max().date()),
+                format="YYYY/MM/DD",
             )
             sources = st.multiselect(
-                "🏛️ 信息来源",
-                options=df['source'].unique(),
-                placeholder="全部来源"
+                "🏛️ 信息来源", options=df["source"].unique(), placeholder="全部来源"
             )
         with col2:
             keyword = st.text_input(
-                "🔎 关键词搜索",
-                placeholder="标题/内容关键词（支持空格分隔多个关键词）",
-                help="示例：公务员 待遇 调整"
+                "🔎 关键词搜索", placeholder="标题/内容关键词（支持空格分隔多个关键词）", help="示例：公务员 待遇 调整"
             )
             regions = st.multiselect(
-                "🌍 相关地区",
-                options=df['region'].unique(),
-                placeholder="全国范围"
+                "🌍 相关地区", options=df["region"].unique(), placeholder="全国范围"
             )
 
     sort_col, _ = st.columns([1, 2])
     with sort_col:
         sort_option = st.selectbox(
-            "排序方式",
-            options=["最新优先", "最旧优先", "热度排序", "来源分类"],
-            index=0
+            "排序方式", options=["最新优先", "最旧优先", "热度排序", "来源分类"], index=0
         )
 
     def process_data(df):
         start_date = pd.Timestamp(date_range[0])
         end_date = pd.Timestamp(date_range[1])
-        filtered = df[df['date'].between(start_date, end_date)]
+        filtered = df[df["date"].between(start_date, end_date)]
         if sources:
-            filtered = filtered[filtered['source'].isin(sources)]
+            filtered = filtered[filtered["source"].isin(sources)]
         if regions:
-            filtered = filtered[filtered['region'].isin(regions)]
+            filtered = filtered[filtered["region"].isin(regions)]
         if keyword:
             keywords = [k.strip() for k in keyword.split()]
-            pattern = '|'.join(keywords)
+            pattern = "|".join(keywords)
             filtered = filtered[
-                filtered['title'].str.contains(pattern, case=False) |
-                filtered['summary'].str.contains(pattern, case=False)
-            ]
+                filtered["title"].str.contains(pattern, case=False)
+                | filtered["summary"].str.contains(pattern, case=False)
+                ]
         if sort_option == "最新优先":
-            return filtered.sort_values('date', ascending=False)
+            return filtered.sort_values("date", ascending=False)
         elif sort_option == "最旧优先":
-            return filtered.sort_values('date', ascending=True)
+            return filtered.sort_values("date", ascending=True)
         elif sort_option == "热度排序":
-            return filtered.sort_values('hotness', ascending=False)
+            return filtered.sort_values("hotness", ascending=False)
         else:
-            return filtered.sort_values(['source', 'date'], ascending=[True, False])
+            return filtered.sort_values(["source", "date"], ascending=[True, False])
 
     processed_df = process_data(df)
 
@@ -601,7 +913,7 @@ def display_policy_news():
     with col_page:
         st.markdown(
             f"<div style='text-align: center; padding-top: 8px;'>第 {st.session_state.current_page} 页 / 共 {total_pages} 页</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
     # 页码重置逻辑
@@ -615,13 +927,16 @@ def display_policy_news():
     if current_data.empty:
         st.warning("😢 未找到符合条件的资讯")
     else:
-        st.markdown(f"""
+        st.markdown(
+            f"""
             <div style="background: #f0f2f6; padding: 12px; border-radius: 8px; margin: 10px 0;">
                 📊 找到 <strong>{len(processed_df)}</strong> 条结果 | 
                 📅 时间跨度：{date_range[0]} 至 {date_range[1]} | 
                 🌟 平均热度值：{processed_df['hotness'].mean():.1f}
             </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
         for _, row in current_data.iterrows():
             with st.container(border=True):
@@ -630,7 +945,8 @@ def display_policy_news():
 
                 with col1:
                     # 增强型可点击标题
-                    st.markdown(f"""
+                    st.markdown(
+                        f"""
                         <a href="{row['url']}" target="_blank" 
                             style="text-decoration: none;
                                    color: inherit;
@@ -644,7 +960,9 @@ def display_policy_news():
                                 {row['title']}
                             </h3>
                         </a>
-                    """, unsafe_allow_html=True)
+                    """,
+                        unsafe_allow_html=True,
+                    )
 
                     meta_cols = st.columns([2, 2, 2], gap="small")
                     with meta_cols[0]:
@@ -654,9 +972,10 @@ def display_policy_news():
                     with meta_cols[2]:
                         st.markdown(f"🌍 **地区**: {row['region']}")
                     with st.expander("📝 查看摘要"):
-                        st.write(row['summary'])
+                        st.write(row["summary"])
                 with col2:
-                    st.markdown(f"""
+                    st.markdown(
+                        f"""
                         <div class="btn-group">
                             <div class="hotness-value">
                                 🔥 {row['hotness']}
@@ -673,38 +992,41 @@ def display_policy_news():
                                 </button>
                             </div>
                         </div>
-                    """, unsafe_allow_html=True)
+                    """,
+                        unsafe_allow_html=True,
+                    )
 
     with st.expander("📈 数据洞察", expanded=False):
         tab1, tab2, tab3 = st.tabs(["来源分析", "时间趋势", "地区分布"])
 
         with tab1:
-            source_counts = processed_df['source'].value_counts().head(10)
+            source_counts = processed_df["source"].value_counts().head(10)
             st.bar_chart(source_counts)
 
         with tab2:
-            time_series = processed_df.set_index('date').resample('W').size()
+            time_series = processed_df.set_index("date").resample("W").size()
             st.area_chart(time_series)
 
         with tab3:
-            region_counts = processed_df['region'].value_counts()
+            region_counts = processed_df["region"].value_counts()
             fig, ax = plt.subplots(figsize=(8, 8))
-            plt.rcParams['font.sans-serif'] = ['SimHei']
-            plt.rcParams['axes.unicode_minus'] = False
-            region_counts.plot.pie(autopct='%1.1f%%', ax=ax)
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.rcParams["axes.unicode_minus"] = False
+            region_counts.plot.pie(autopct="%1.1f%%", ax=ax)
             ax.set_ylabel("")
             st.pyplot(fig)
 
         st.download_button(
             label="📥 导出当前结果（CSV）",
-            data=processed_df.to_csv(index=False).encode('utf-8'),
+            data=processed_df.to_csv(index=False).encode("utf-8"),
             file_name=f"policy_news_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
             mime="text/csv",
-            help="导出当前筛选条件下的所有结果"
+            help="导出当前筛选条件下的所有结果",
         )
 
     # 移动端优化样式
-    st.markdown("""
+    st.markdown(
+        """
         <style>
             /* 通用按钮样式 */
             .policy-btn {
@@ -796,7 +1118,10 @@ def display_policy_news():
                 transform: scale(0.95) !important;
             }
         </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
+
 
 # 高分经验模块
 def display_experience():
@@ -810,15 +1135,16 @@ def display_experience():
         col_upload, col_desc = st.columns([2, 3])
 
         with col_upload:
-            upload_type = st.radio("选择上传类型",
-                                   ["学习笔记", "错题集"],
-                                   horizontal=True,
-                                   help="请选择资料分类")
+            upload_type = st.radio(
+                "选择上传类型", ["学习笔记", "错题集"], horizontal=True, help="请选择资料分类"
+            )
 
-            uploaded_files = st.file_uploader("选择文件",
-                                              type=["pdf", "jpg", "jpeg", "png"],
-                                              accept_multiple_files=True,
-                                              help="支持格式：PDF/图片")
+            uploaded_files = st.file_uploader(
+                "选择文件",
+                type=["pdf", "jpg", "jpeg", "png"],
+                accept_multiple_files=True,
+                help="支持格式：PDF/图片",
+            )
 
             if st.button("🚀 开始上传", key="user_upload"):
                 if not uploaded_files:
@@ -845,38 +1171,40 @@ def display_experience():
                     st.balloons()
 
         with col_desc:
-            st.markdown("""
+            st.markdown(
+                """
                 **📝 上传说明**
                 - 文件命名建议：`科目_内容`（示例：行测_图形推理技巧.pdf）
                 - 单个文件大小限制：不超过20MB
                 - 审核机制：上传内容将在24小时内人工审核
                 - 禁止上传包含个人隐私信息的资料
-            """)
+            """
+            )
 
     # 资料展示功能区
     st.markdown("## 📚 资料浏览")
-    tab_exp, tab_notes, tab_errors = st.tabs([
-        "📜 高分经验",
-        "📖 学习笔记",
-        "❌ 错题集"
-    ])
+    tab_exp, tab_notes, tab_errors = st.tabs(["📜 高分经验", "📖 学习笔记", "❌ 错题集"])
 
     # 公共显示函数
     def display_files(prefix, tab):
         try:
             file_list = []
             for obj in oss2.ObjectIterator(bucket, prefix=prefix):
-                if not obj.key.endswith('/'):
+                if not obj.key.endswith("/"):
                     # 解析文件名（去除时间戳）
                     raw_name = obj.key.split("/")[-1]
                     display_name = "_".join(raw_name.split("_")[1:])  # 去掉时间戳
 
-                    file_list.append({
-                        "display": display_name,
-                        "raw_name": raw_name,
-                        "url": f"{ENDPOINT}/{obj.key}",
-                        "type": "pdf" if obj.key.lower().endswith(".pdf") else "image"
-                    })
+                    file_list.append(
+                        {
+                            "display": display_name,
+                            "raw_name": raw_name,
+                            "url": f"{ENDPOINT}/{obj.key}",
+                            "type": "pdf"
+                            if obj.key.lower().endswith(".pdf")
+                            else "image",
+                        }
+                    )
 
             if not file_list:
                 tab.warning("当前分类下暂无资料")
@@ -891,24 +1219,32 @@ def display_experience():
                         # 显示预览
                         if file_info["type"] == "image":
                             img_data = get_cached_oss_object(obj.key)
-                            st.image(BytesIO(img_data),
-                                     use_container_width=True,
-                                     caption=file_info["display"])
+                            st.image(
+                                BytesIO(img_data),
+                                use_container_width=True,
+                                caption=file_info["display"],
+                            )
                         else:
                             # PDF显示带文件名
                             st.markdown(f"📄 **{file_info['display']}**")
-                            base64_pdf = base64.b64encode(bucket.get_object(obj.key).read()).decode()
-                            st.markdown(f"""
+                            base64_pdf = base64.b64encode(
+                                bucket.get_object(obj.key).read()
+                            ).decode()
+                            st.markdown(
+                                f"""
                                 <iframe 
                                     src="data:application/pdf;base64,{base64_pdf}"
                                     width="100%" 
                                     height="300px"
                                     style="border:1px solid #eee; border-radius:5px;">
                                 </iframe>
-                            """, unsafe_allow_html=True)
+                            """,
+                                unsafe_allow_html=True,
+                            )
 
                         # 下载按钮
-                        st.markdown(f"""
+                        st.markdown(
+                            f"""
                             <div style="margin-top:10px; text-align:center;">
                                 <a href="{file_info['url']}" download>
                                     <button style="
@@ -922,7 +1258,9 @@ def display_experience():
                                     </button>
                                 </a>
                             </div>
-                        """, unsafe_allow_html=True)
+                        """,
+                            unsafe_allow_html=True,
+                        )
 
         except Exception as e:
             tab.error(f"加载失败：{str(e)}")
@@ -937,14 +1275,18 @@ def display_experience():
     with tab_errors:
         display_files(prefix="错题集/", tab=tab_errors)
 
-#考试日历模块
+
+# 考试日历模块
 def display_exam_calendar():
     st.title("📅 智能考试日历")
-    st.markdown("⚠️ <span style='color:red;'>考试时间仅供参考，请以官方公布为准！</span>", unsafe_allow_html=True)
+    st.markdown(
+        "⚠️ <span style='color:red;'>考试时间仅供参考，请以官方公布为准！</span>", unsafe_allow_html=True
+    )
     st.markdown("---")
 
     # 样式注入
-    st.markdown("""
+    st.markdown(
+        """
         <style>
             .timeline {
                 border-left: 3px solid #3C82F6;
@@ -979,7 +1321,9 @@ def display_exam_calendar():
                 .timeline-item { padding: 10px; }
             }
         </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     # 缓存数据加载
     @st.cache_data(ttl=3600, show_spinner="正在加载考试日历...")
@@ -987,22 +1331,21 @@ def display_exam_calendar():
         try:
             # 加载结构化考试事件数据
             event_file = bucket.get_object("考试日历/events_date.json").read()
-            events = json.loads(event_file)['events']
+            events = json.loads(event_file)["events"]
 
             # 加载图片文件索引
             images = []
             for obj in oss2.ObjectIterator(bucket, prefix="考试日历/images/"):
                 if obj.key.lower().endswith((".jpg", ".jpeg", ".png")):
-                    images.append({
-                        "key": obj.key,
-                        "name": obj.key.split("/")[-1],
-                        "url": f"{ENDPOINT}/{obj.key}"
-                    })
+                    images.append(
+                        {
+                            "key": obj.key,
+                            "name": obj.key.split("/")[-1],
+                            "url": f"{ENDPOINT}/{obj.key}",
+                        }
+                    )
 
-            return {
-                "events": sorted(events, key=lambda x: x['date']),
-                "images": images
-            }
+            return {"events": sorted(events, key=lambda x: x["date"]), "images": images}
 
         except Exception as e:
             st.error(f"❌ 数据加载失败：{str(e)}")
@@ -1010,8 +1353,8 @@ def display_exam_calendar():
 
     # 加载数据
     data = load_calendar_data()
-    events = data['events']
-    images = data['images']
+    events = data["events"]
+    images = data["images"]
 
     # 顶部过滤栏
     with st.container():
@@ -1019,21 +1362,29 @@ def display_exam_calendar():
         with col1:
             selected_year = st.selectbox(
                 "选择年份",
-                options=sorted({datetime.strptime(e['date'], "%Y-%m-%d").year for e in events}, reverse=True),
-                index=0
+                options=sorted(
+                    {datetime.strptime(e["date"], "%Y-%m-%d").year for e in events},
+                    reverse=True,
+                ),
+                index=0,
             )
         with col2:
             search_query = st.text_input("🔍 搜索考试名称或地区", placeholder="输入关键词筛选...")
         with col3:
             view_mode = "🗓 月历视图"  # 强制固定视图模式
-            st.markdown('<div style="visibility:hidden">占位</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div style="visibility:hidden">占位</div>', unsafe_allow_html=True
+            )
 
     # 过滤数据
     filtered_events = [
-        e for e in events
-        if datetime.strptime(e['date'], "%Y-%m-%d").year == selected_year
-        and (search_query.lower() in e['name'].lower()
-             or any(search_query.lower() in r.lower() for r in e['regions']))
+        e
+        for e in events
+        if datetime.strptime(e["date"], "%Y-%m-%d").year == selected_year
+           and (
+                   search_query.lower() in e["name"].lower()
+                   or any(search_query.lower() in r.lower() for r in e["regions"])
+           )
     ]
 
     # 展示内容
@@ -1042,27 +1393,31 @@ def display_exam_calendar():
 
         monthly_events = defaultdict(list)
         for event in filtered_events:
-            month = datetime.strptime(event['date'], "%Y-%m-%d").month
+            month = datetime.strptime(event["date"], "%Y-%m-%d").month
             monthly_events[month].append(event)
 
         for idx, tab in enumerate(tabs):
             month_num = idx + 1
             with tab:
                 # 查找该月对应图片
-                month_images = [img for img in images if f"{selected_year}-{month_num:02}" in img['name']]
+                month_images = [
+                    img
+                    for img in images
+                    if f"{selected_year}-{month_num:02}" in img["name"]
+                ]
 
                 if month_images:
                     cols = st.columns(2)
                     for img_idx, img in enumerate(month_images):
                         with cols[img_idx % 2]:
                             with st.popover(f"📷 {img['name'].split('.')[0]}"):
-                                img_data = get_cached_oss_object(img['key'])
+                                img_data = get_cached_oss_object(img["key"])
                                 st.image(BytesIO(img_data), use_container_width=True)
                                 st.download_button(
                                     "下载原图",
                                     data=img_data,
-                                    file_name=img['name'],
-                                    mime="image/jpeg"
+                                    file_name=img["name"],
+                                    mime="image/jpeg",
                                 )
                             st.caption(f"📅 {img['name'].split('.')[0]}")
 
@@ -1080,7 +1435,7 @@ def display_exam_calendar():
                             st.markdown(f"**地区**: {', '.join(event['regions'])}")
                             st.markdown(f"**来源**: {', '.join(event['sources'])}")
                         with col2:
-                            if event.get('image'):
+                            if event.get("image"):
                                 st.image(f"{ENDPOINT}/{event['image']}", width=120)
 
     # 侧边提醒栏
@@ -1088,8 +1443,8 @@ def display_exam_calendar():
         st.header("🔔 提醒服务")
         selected_events = st.multiselect(
             "选择要提醒的考试",
-            options=[e['name'] for e in filtered_events],
-            placeholder="选择考试项目"
+            options=[e["name"] for e in filtered_events],
+            placeholder="选择考试项目",
         )
 
         if selected_events:
@@ -1108,6 +1463,7 @@ def display_exam_calendar():
 
             if qr_image_data:
                 import base64
+
                 b64_img = base64.b64encode(qr_image_data).decode("utf-8")
                 st.image(f"data:image/png;base64,{b64_img}", width=300)
             else:
@@ -1117,7 +1473,8 @@ def display_exam_calendar():
             st.warning(f"⚠️ 加载二维码失败：{e}")
 
     # 移动端适配
-    st.markdown("""
+    st.markdown(
+        """
         <script>
             window.addEventListener('resize', function() {
                 const images = document.querySelectorAll('img');
@@ -1130,7 +1487,10 @@ def display_exam_calendar():
                 });
             });
         </script>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
+
 
 # 管理员上传模块
 def admin_upload_center():
@@ -1151,14 +1511,16 @@ def admin_upload_center():
                 upload_file_to_oss(file, category=category)
         st.success("✅ 上传完成！")
 
+
 # 主函数
 def main():
     dark_mode = st.sidebar.toggle("🌙 夜间模式")
     set_dark_mode(dark_mode)
 
     st.sidebar.title("🎯 公考助手")
-    menu = st.sidebar.radio("📌 功能导航",
-                            ["智能问答", "考试日历", "备考资料", "政策资讯", "高分经验", "上传资料（管理员）"])
+    menu = st.sidebar.radio(
+        "📌 功能导航", ["智能问答", "考试日历", "备考资料", "政策资讯", "高分经验", "上传资料（管理员）"]
+    )
 
     if menu == "智能问答":
         showLLMChatbot()
@@ -1173,5 +1535,6 @@ def main():
     elif menu == "上传资料（管理员）":
         admin_upload_center()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
