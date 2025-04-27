@@ -813,89 +813,211 @@ def process_essay(text):
         st.warning("⚠️ 内容为空")
         return
 
-    with st.spinner("🧠 AI正在批阅中，请稍等..."):
-        feedback = review_essay(text)
+    with st.spinner("🧠 正在批阅并优化中，请稍候..."):
+        history = improve_until_pass(text, target_score=90, max_rounds=5)
 
-    if feedback:
-        st.success("✅ 批阅完成！")
+    if history:
+        final = history[-1]
 
-        # 展示批阅文本
-        st.markdown("### 📝 批阅反馈")
-        st.markdown(feedback)
+        st.success(f"✅ 优化完成！最终得分：{final['total_score']} 分")
 
-        # 自动提取得分并画图
-        scores = extract_scores(feedback)
-        if scores:
-            st.markdown("### 📊 作文得分")
-            st.bar_chart(scores)
+        st.info("🔄 以下为自动优化后的最终最优版作文：")
+
+        st.markdown("### 📜 优化后作文")
+        st.markdown(final['essay'])
+
+        st.markdown("### 📊 得分维度（细分项）")
+        if final['scores']:
+            st.bar_chart(final['scores'])
         else:
-            st.info("⚠️ 未能识别出得分信息")
+            st.warning("⚠️ 最终未能成功提取每个维度得分，请检查批阅格式")
+
+        st.markdown("### 📑 批阅反馈详情")
+        st.markdown(final['feedback'])
 
 
-def review_essay(essay_text):
+
+def improve_until_pass(initial_essay, target_score=90, max_rounds=5):
+    essay = initial_essay
+
+    for round_num in range(max_rounds):
+        feedback = review_essay(essay)
+        scores = extract_scores(feedback)
+        total_score = sum(scores.values()) if scores else 0
+
+        if total_score >= target_score:
+            return [{
+                "round": round_num + 1,
+                "essay": essay,
+                "feedback": feedback,
+                "scores": scores,
+                "total_score": total_score,
+            }]
+        else:
+            essay = optimize_essay(essay, feedback)
+
+    # 如果到这里还没达标，就返回最后一次
+    return [{
+        "round": max_rounds,
+        "essay": essay,
+        "feedback": feedback,
+        "scores": scores,
+        "total_score": total_score,
+    }]
+
+
+def review_essay(essay):
     client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
     system_prompt = """
-你是一名专业的公务员考试申论批阅专家，请对考生提交的作文进行专业批阅。
+你是一位专业的申论考试批阅专家。
 
-要求：
-1. 总体点评：简要评价整体立意、结构、逻辑与语言表达。
-2. 亮点总结：指出文章中的优点。
-3. 改进建议：指出不足之处并提出具体修改建议。
-4. 评分标准：请分别给出以下三项得分，每项满分20分，并计算总分（满分60分）：
-   - 内容（满分20）
-   - 结构（满分20）
-   - 表达（满分20）
+请按照以下标准（各维度细则）对考生作文进行严格打分。每个小项必须单独给出得分。
+要求输出格式标准规范，方便提取。
 
-示例：
-内容得分：16分
-结构得分：15分
-表达得分：17分
-总分：48分
+【内容维度】（40分）：
+- 切题程度（10分）
+- 思想深度（15分）
+- 论据质量（15分）
 
-请严格按照上述要求输出，内容通顺自然。
+【结构维度】（20分）：
+- 整体布局（8分）
+- 段落安排（6分）
+- 开头结尾（6分）
+
+【语言维度】（30分）：
+- 语言规范（10分）
+- 表达流畅（10分）
+- 风格得体（10分）
+
+【书写维度】（10分）：
+- 字迹工整（4分）
+- 卷面整洁（3分）
+- 字数符合（3分）
+
+输出要求：
+- 每个小项得分清晰列出
+- 最后给出总得分（满分100分）
+- 必须严格根据标准细则评判，不要随意满分。
+
+下面是考生作文，请进行全面批阅和打分：
 """
+
+    user_prompt = f"{essay}"
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": essay_text},
+        {"role": "user", "content": user_prompt},
     ]
 
     try:
-        completion = client.chat.completions.create(
+        stream = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
+            stream=True  # ✅ 开启流式输出
         )
-        return completion.choices[0].message.content
+
+        # Streamlit实时展示
+        collected_content = ""
+
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_message = ""
+
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    partial = chunk.choices[0].delta.content
+                    full_message += partial
+                    message_placeholder.markdown(full_message + "▌")  # 实时动态输出
+
+            message_placeholder.markdown(full_message)  # 最终补齐
+
+        return full_message
+
     except Exception as e:
         return f"❌ 批阅失败：{str(e)}"
 
 
-import re
+def optimize_essay(essay, feedback):
+    client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+    system_prompt = """
+你是一名申论写作专家，请根据批阅反馈内容，优化和提升考生作文，使其尽可能达到满分标准。
+
+要求：
+- 保持原文主题不变。
+- 针对批阅反馈指出的不足（如内容深度、论据质量、结构安排、语言规范等方面）进行改进。
+- 优化后的文章应更符合评分标准，避免原有问题。
+- 字数保持合理，语言符合申论文风。
+
+请只返回优化后的完整作文正文。
+"""
+
+    user_prompt = f"""
+【考生原文】：
+{essay}
+
+【批阅反馈】：
+{feedback}
+
+请在以上基础上进行全面优化。
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    try:
+        stream = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            stream=True
+        )
+
+        collected_content = ""
+
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_message = ""
+
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    partial = chunk.choices[0].delta.content
+                    full_message += partial
+                    message_placeholder.markdown(full_message + "▌")
+
+            message_placeholder.markdown(full_message)
+
+        return full_message
+
+    except Exception as e:
+        return f"❌ 优化失败：{str(e)}"
 
 
 def extract_scores(feedback_text):
     """
-    从批阅文本中提取内容、结构、表达得分
-    返回字典，比如 {"内容": 16, "结构": 15, "表达": 17}
+    从批阅反馈中提取细项得分，增强版，兼容各种小变动
     """
-    try:
-        scores = {}
-        content_score = re.search(r"内容得分[:：]\s*(\d+)", feedback_text)
-        structure_score = re.search(r"结构得分[:：]\s*(\d+)", feedback_text)
-        expression_score = re.search(r"表达得分[:：]\s*(\d+)", feedback_text)
+    import re
 
-        if content_score:
-            scores["内容"] = int(content_score.group(1))
-        if structure_score:
-            scores["结构"] = int(structure_score.group(1))
-        if expression_score:
-            scores["表达"] = int(expression_score.group(1))
+    small_items = [
+        "切题程度", "思想深度", "论据质量",
+        "整体布局", "段落安排", "开头结尾",
+        "语言规范", "表达流畅", "风格得体",
+        "字迹工整", "卷面整洁", "字数符合",
+    ]
 
-        return scores if scores else None
+    extracted_scores = {}
 
-    except Exception as e:
-        return None
+    for item in small_items:
+        # 支持得9分，也支持直接9分，支持各种冒号
+        pattern = rf"{item}（\d+分）[:：]?\s*(?:得)?(\d+)"
+        match = re.search(pattern, feedback_text)
+        if match:
+            extracted_scores[item] = int(match.group(1))
+
+    return extracted_scores if extracted_scores else None
 
 
 # 备考资料模块
