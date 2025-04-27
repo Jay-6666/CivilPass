@@ -11,10 +11,8 @@ torch>=2.0.1
 pillow>=10.0.0
 pyvis>=0.3.2
 hanlp>=2.1.0
-
-# 新增支持申论批阅OCR功能
 paddleocr>=2.6.1
-paddlepaddle>=2.5.0  # 注意: 根据你的机器(CPU/GPU)调整版本
+paddlepaddle>=2.5.0
 pdfplumber>=0.7.6
 python-docx>=0.8.11
 opencv-python>=4.7.0.68
