@@ -753,6 +753,23 @@ def show_essay_review():
         uploaded_file = st.file_uploader("上传申论作文图片或文件", type=["jpg", "jpeg", "png", "pdf", "docx"])
 
         if uploaded_file:
+            # ✅ 新增：如果是图片，先压缩尺寸
+            if uploaded_file.type.startswith("image/"):
+                image = Image.open(uploaded_file)
+                max_width = 1200
+                if image.width > max_width:
+                    ratio = max_width / image.width
+                    new_size = (max_width, int(image.height * ratio))
+                    image = image.resize(new_size)
+                    # 把压缩后的图片存回 uploaded_file 变量
+                    # 这里要用BytesIO再转成文件对象
+                    from io import BytesIO
+                    buffered = BytesIO()
+                    image.save(buffered, format="JPEG")
+                    buffered.seek(0)
+                    uploaded_file = buffered  # 重新赋值！
+
+            # 下面继续原来的提取文本流程
             file_text = extract_text_from_file(uploaded_file)
 
             if file_text:
