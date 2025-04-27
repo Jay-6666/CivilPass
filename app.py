@@ -476,9 +476,6 @@ def showLLMChatbot():
 
 
 def show_normal_chat():
-    st.title("📝 智能公考助手")
-    st.caption("📢 输入你的公考问题，或上传试题截图，AI 帮你解答！")
-    st.markdown("---")
 
     # 初始化会话状态
     if "messages" not in st.session_state:
