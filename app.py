@@ -463,6 +463,20 @@ def generate_kg_html(nodes, edges):
 # 智能问答模块
 def showLLMChatbot():
     st.title("📝 智能公考助手")
+    st.caption("📢 输入你的问题，或批阅申论作文，AI帮你搞定！")
+    st.markdown("---")
+
+    tabs = st.tabs(["🤖 智能问答", "📝 申论批阅"])
+
+    with tabs[0]:  # 智能问答
+        show_normal_chat()
+
+    with tabs[1]:  # 申论批阅
+        show_essay_review()
+
+
+def show_normal_chat():
+    st.title("📝 智能公考助手")
     st.caption("📢 输入你的公考问题，或上传试题截图，AI 帮你解答！")
     st.markdown("---")
 
@@ -707,6 +721,162 @@ def showLLMChatbot():
             st.session_state.current_input = ""
             st.session_state.uploaded_file = None
             st.rerun()
+
+
+from PIL import Image
+import pdfplumber
+import docx
+from paddleocr import PaddleOCR
+import numpy as np
+
+# 初始化OCR（放在文件开头）
+ocr_model = PaddleOCR(use_angle_cls=True, lang='ch')
+
+
+def show_essay_review():
+    st.subheader("✍️ 申论作文批阅")
+
+    tabs = st.tabs(["🖊️ 输入文本", "📄 上传图片/文件"])
+
+    with tabs[0]:
+        essay_text = st.text_area("请输入你的申论作文", height=300, placeholder="粘贴或输入完整的作文...")
+
+        if st.button("🚀 提交批阅", key="submit_text"):
+            process_essay(essay_text)
+
+    with tabs[1]:
+        uploaded_file = st.file_uploader("上传申论作文图片或文件", type=["jpg", "jpeg", "png", "pdf", "docx"])
+
+        if uploaded_file:
+            file_text = extract_text_from_file(uploaded_file)
+
+            if file_text:
+                st.success("✅ 文件识别成功，可以进行批阅")
+                st.text_area("📋 识别到的文本（可修改后批阅）", value=file_text, height=300, key="recognized_text")
+
+                if st.button("🚀 提交批阅", key="submit_file"):
+                    process_essay(file_text)
+            else:
+                st.error("❌ 文件识别失败，请上传清晰的图片或标准文档")
+
+
+def extract_text_from_file(file):
+    file_type = file.type
+
+    try:
+        if "image" in file_type:
+            # 图片文件
+            image = Image.open(file)
+            result = ocr_model.ocr(np.array(image), cls=True)
+            text = "\n".join([line[1][0] for line in result[0]])
+            return text
+
+        elif "pdf" in file_type:
+            # PDF文件
+            with pdfplumber.open(file) as pdf:
+                pages = [page.extract_text() for page in pdf.pages]
+            return "\n".join(pages)
+
+        elif "officedocument" in file_type:
+            # Word 文件 (docx)
+            doc = docx.Document(file)
+            return "\n".join([p.text for p in doc.paragraphs])
+
+        else:
+            return None
+    except Exception as e:
+        st.error(f"识别出错: {e}")
+        return None
+
+
+def process_essay(text):
+    if not text.strip():
+        st.warning("⚠️ 内容为空")
+        return
+
+    with st.spinner("🧠 AI正在批阅中，请稍等..."):
+        feedback = review_essay(text)
+
+    if feedback:
+        st.success("✅ 批阅完成！")
+
+        # 展示批阅文本
+        st.markdown("### 📝 批阅反馈")
+        st.markdown(feedback)
+
+        # 自动提取得分并画图
+        scores = extract_scores(feedback)
+        if scores:
+            st.markdown("### 📊 作文得分")
+            st.bar_chart(scores)
+        else:
+            st.info("⚠️ 未能识别出得分信息")
+
+
+def review_essay(essay_text):
+    client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+    system_prompt = """
+你是一名专业的公务员考试申论批阅专家，请对考生提交的作文进行专业批阅。
+
+要求：
+1. 总体点评：简要评价整体立意、结构、逻辑与语言表达。
+2. 亮点总结：指出文章中的优点。
+3. 改进建议：指出不足之处并提出具体修改建议。
+4. 评分标准：请分别给出以下三项得分，每项满分20分，并计算总分（满分60分）：
+   - 内容（满分20）
+   - 结构（满分20）
+   - 表达（满分20）
+
+示例：
+内容得分：16分
+结构得分：15分
+表达得分：17分
+总分：48分
+
+请严格按照上述要求输出，内容通顺自然。
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": essay_text},
+    ]
+
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"❌ 批阅失败：{str(e)}"
+
+
+import re
+
+
+def extract_scores(feedback_text):
+    """
+    从批阅文本中提取内容、结构、表达得分
+    返回字典，比如 {"内容": 16, "结构": 15, "表达": 17}
+    """
+    try:
+        scores = {}
+        content_score = re.search(r"内容得分[:：]\s*(\d+)", feedback_text)
+        structure_score = re.search(r"结构得分[:：]\s*(\d+)", feedback_text)
+        expression_score = re.search(r"表达得分[:：]\s*(\d+)", feedback_text)
+
+        if content_score:
+            scores["内容"] = int(content_score.group(1))
+        if structure_score:
+            scores["结构"] = int(structure_score.group(1))
+        if expression_score:
+            scores["表达"] = int(expression_score.group(1))
+
+        return scores if scores else None
+
+    except Exception as e:
+        return None
 
 
 # 备考资料模块
