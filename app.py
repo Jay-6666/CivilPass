@@ -836,34 +836,43 @@ def process_essay(text):
         st.markdown(final['feedback'])
 
 
-
-def improve_until_pass(initial_essay, target_score=90, max_rounds=5):
+def improve_until_pass(initial_essay, target_score=90, max_rounds=1):
+    """
+    只改进一次申论作文，达标或不达标都直接返回最终结果。
+    """
     essay = initial_essay
 
-    for round_num in range(max_rounds):
-        feedback = review_essay(essay)
-        scores = extract_scores(feedback)
-        total_score = sum(scores.values()) if scores else 0
+    # 第一次批阅
+    feedback = review_essay(essay)
+    scores = extract_scores(feedback)
+    total_score = sum(scores.values()) if scores else 0
 
-        if total_score >= target_score:
-            return [{
-                "round": round_num + 1,
-                "essay": essay,
-                "feedback": feedback,
-                "scores": scores,
-                "total_score": total_score,
-            }]
-        else:
-            essay = optimize_essay(essay, feedback)
+    if total_score >= target_score:
+        # 如果一开始就达标，直接返回
+        return [{
+            "round": 1,
+            "essay": essay,
+            "feedback": feedback,
+            "scores": scores,
+            "total_score": total_score,
+        }]
+    else:
+        # 如果没达标，进行一次优化
+        improved_essay = optimize_essay(essay, feedback)
 
-    # 如果到这里还没达标，就返回最后一次
-    return [{
-        "round": max_rounds,
-        "essay": essay,
-        "feedback": feedback,
-        "scores": scores,
-        "total_score": total_score,
-    }]
+        # 再次批阅优化后的作文
+        feedback2 = review_essay(improved_essay)
+        scores2 = extract_scores(feedback2)
+        total_score2 = sum(scores2.values()) if scores2 else 0
+
+        # 返回第一次优化后的最终结果（无论是否达标）
+        return [{
+            "round": 1,
+            "essay": improved_essay,
+            "feedback": feedback2,
+            "scores": scores2,
+            "total_score": total_score2,
+        }]
 
 
 def review_essay(essay):
