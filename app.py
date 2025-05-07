@@ -1,3 +1,10 @@
+import torch
+
+try:
+    _ = dir(torch.classes)
+except RuntimeError:
+    pass
+
 import base64
 import json
 import os
