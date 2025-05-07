@@ -720,11 +720,11 @@ def show_normal_chat():
             st.rerun()
 
 
-# from PIL import Image
-# import pdfplumber
-# import docx
+from PIL import Image
+import pdfplumber
+import docx
 # from paddleocr import PaddleOCR
-# import numpy as np
+import numpy as np
 
 # # 初始化OCR（放在文件开头）
 # ocr_model = PaddleOCR(
