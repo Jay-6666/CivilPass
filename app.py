@@ -720,19 +720,19 @@ def show_normal_chat():
             st.rerun()
 
 
-from PIL import Image
-import pdfplumber
-import docx
-from paddleocr import PaddleOCR
-import numpy as np
+# from PIL import Image
+# import pdfplumber
+# import docx
+# from paddleocr import PaddleOCR
+# import numpy as np
 
-# 初始化OCR（放在文件开头）
-ocr_model = PaddleOCR(
-    use_angle_cls=False,
-    lang='ch',
-    det_model_dir='./models/ch_PP-OCRv4_det_infer',  # 本地检测模型路径
-    rec_model_dir='./models/ch_PP-OCRv4_rec_infer'   # 本地识别模型路径
-)
+# # 初始化OCR（放在文件开头）
+# ocr_model = PaddleOCR(
+#     use_angle_cls=False,
+#     lang='ch',
+#     det_model_dir='./models/ch_PP-OCRv4_det_infer',  # 本地检测模型路径
+#     rec_model_dir='./models/ch_PP-OCRv4_rec_infer'   # 本地识别模型路径
+# )
 
 
 def show_essay_review():
