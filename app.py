@@ -22,7 +22,6 @@ import oss2
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import torch
 from dotenv import load_dotenv
 from matplotlib import font_manager
 from PIL import Image
