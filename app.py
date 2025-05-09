@@ -1336,7 +1336,7 @@ def display_policy_news():
         with tab3:
             region_counts = processed_df["region"].value_counts()
             fig, ax = plt.subplots(figsize=(8, 8))
-            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
             plt.rcParams["axes.unicode_minus"] = False
             region_counts.plot.pie(autopct="%1.1f%%", ax=ax)
             ax.set_ylabel("")
