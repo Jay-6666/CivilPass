@@ -472,7 +472,7 @@ def showLLMChatbot():
     st.caption("📢 输入你的问题，或批阅申论作文，AI帮你搞定！")
     st.markdown("---")
 
-    tabs = st.tabs(["🤖 智能问答", "📝 申论批阅"])
+    tabs = st.tabs(["🤖 智能问答", "📝 题目识别批阅"])
 
     with tabs[0]:  # 智能问答
         show_normal_chat()
@@ -742,18 +742,18 @@ import numpy as np
 
 
 def show_essay_review():
-    st.subheader("✍️ 申论作文批阅")
+    st.subheader("✍️ 题目识别批阅")
 
-    tabs = st.tabs(["🖊️ 输入文本", "📄 上传图片/文件"])
+    tabs = st.tabs(["🖊️ 输入题目", "📄 上传图片/文件"])
 
     with tabs[0]:
-        essay_text = st.text_area("请输入你的申论作文", height=300, placeholder="粘贴或输入完整的作文...")
+        essay_text = st.text_area("请输入你的题目", height=300, placeholder="粘贴或输入完整的题目...")
 
         if st.button("🚀 提交批阅", key="submit_text"):
             process_essay(essay_text)
 
     with tabs[1]:
-        uploaded_file = st.file_uploader("上传申论作文图片或文件", type=["jpg", "jpeg", "png", "pdf", "docx"])
+        uploaded_file = st.file_uploader("上传题目的图片或文件", type=["jpg", "jpeg", "png", "pdf", "docx"])
 
         if uploaded_file:
             # ✅ 新增：如果是图片，先压缩尺寸
@@ -814,35 +814,49 @@ def extract_text_from_file(file):
         return None
 
 
+# 顶部引入
+from scoring_criteria import get_scoring_criteria
+
 def process_essay(text):
     if not text.strip():
         st.warning("⚠️ 内容为空")
         return
 
+    # 🎯 获取评分规则 & 自动识别题型
+    criteria = get_scoring_criteria(text)
+    question_type = criteria['题型']
+    st.markdown(f"### 🧠 自动识别题型：**{question_type}**")
+
+    with st.expander("📚 当前评分标准（点击展开）", expanded=False):
+        for dim, subitems in criteria['评分维度'].items():
+            st.markdown(f"#### 🔹 {dim}")
+            for subname, detail in subitems.items():
+                st.markdown(f"- **{subname}**")
+                st.markdown(f"  - 说明：{detail['说明']}")
+                st.markdown(f"  - 扣分规则：{detail['扣分规则']}")
+                st.markdown(f"  - 建议：{detail['建议']}")
+
     with st.spinner("🧠 正在批阅并优化中，请稍候..."):
-        history = improve_until_pass(text, target_score=90, max_rounds=5)
+        history = improve_until_pass(text, question_type=question_type, target_score=90, max_rounds=5)
 
     if history:
         final = history[-1]
-
         st.success(f"✅ 优化完成！最终得分：{final['total_score']} 分")
 
-        st.info("🔄 以下为自动优化后的最终最优版作文：")
-
-        st.markdown("### 📜 优化后作文")
-        st.markdown(final['essay'])
+        st.markdown("### 📜 优化后的答案")
+        st.markdown(final["essay"])
 
         st.markdown("### 📊 得分维度（细分项）")
-        if final['scores']:
-            st.bar_chart(final['scores'])
+        if final["scores"]:
+            st.bar_chart(final["scores"])
         else:
-            st.warning("⚠️ 最终未能成功提取每个维度得分，请检查批阅格式")
+            st.warning("⚠️ 未能提取维度得分")
 
         st.markdown("### 📑 批阅反馈详情")
-        st.markdown(final['feedback'])
+        st.markdown(final["feedback"])
 
 
-def improve_until_pass(initial_essay, target_score=90, max_rounds=1):
+def improve_until_pass(initial_essay, question_type="大作文", target_score=90, max_rounds=1):
     """
     只改进一次申论作文，达标或不达标都直接返回最终结果。
     """
@@ -864,7 +878,7 @@ def improve_until_pass(initial_essay, target_score=90, max_rounds=1):
         }]
     else:
         # 如果没达标，进行一次优化
-        improved_essay = optimize_essay(essay, feedback)
+        improved_essay = optimize_essay(essay, feedback, question_type)
 
         # 再次批阅优化后的作文
         feedback2 = review_essay(improved_essay)
@@ -953,10 +967,11 @@ def review_essay(essay):
         return f"❌ 批阅失败：{str(e)}"
 
 
-def optimize_essay(essay, feedback):
+def optimize_essay(essay, feedback, question_type="大作文"):
     client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-    system_prompt = """
+    if question_type == "大作文":
+        system_prompt = """
 你是一名申论写作专家，请根据批阅反馈内容，优化和提升考生作文，使其尽可能达到满分标准。
 
 要求：
@@ -966,6 +981,18 @@ def optimize_essay(essay, feedback):
 - 字数保持合理，语言符合申论文风。
 
 请只返回优化后的完整作文正文。
+"""
+    else:
+        system_prompt = f"""
+你是一位申论写作专家，请根据批阅反馈内容，优化并提升一篇【{question_type}】类申论题的答案。
+
+要求：
+- 明确保留原题型结构，例如分析题应保持“表态-分析-总结”格式；
+- 控制字数在题干要求范围内（如300字以内）；
+- 避免写成长篇议论文；
+- 逻辑清晰，语言准确，表达简练。
+
+请直接输出优化后的完整内容。
 """
 
     user_prompt = f"""
@@ -1336,7 +1363,7 @@ def display_policy_news():
         with tab3:
             region_counts = processed_df["region"].value_counts()
             fig, ax = plt.subplots(figsize=(8, 8))
-            plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
             plt.rcParams["axes.unicode_minus"] = False
             region_counts.plot.pie(autopct="%1.1f%%", ax=ax)
             ax.set_ylabel("")
